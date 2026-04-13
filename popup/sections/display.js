@@ -3,7 +3,8 @@ import { saveSetting } from "../popup.js";
 const DISPLAY_MODES = [
   { id: "floatingDot", label: "Floating Dot", desc: "Small dot near answers, hover to expand card" },
   { id: "urlHash", label: "URL Hash", desc: "Answer written to address bar hash only" },
-  { id: "sidebar", label: "Sidebar Chat", desc: "Persistent chat panel with full conversation" }
+  { id: "sidebar", label: "Sidebar Chat", desc: "Persistent chat panel with full conversation" },
+  { id: "none", label: "None (Auto-fill only)", desc: "Auto-fills answers silently, no visual display" }
 ];
 
 export function initDisplaySection(settings) {
@@ -33,7 +34,7 @@ export function initDisplaySection(settings) {
   html += `<span class="qsa-toggle-label">Enable Auto-Solve</span>`;
   html += `<label class="qsa-toggle"><input type="checkbox" id="qsa-auto-solve" ${settings.autoSolve ? "checked" : ""}><span class="qsa-toggle-track"></span></label>`;
   html += `</div>`;
-  html += `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Automatically detects all questions, triggers AI for each, and auto-fills answers when possible. If auto-fill isn't possible, answers are shown via your selected display mode.</div>`;
+  html += `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Automatically detects all questions, triggers AI for each, and auto-fills answers. If auto-fill fails, uses your selected display mode (or does nothing if "None" is selected).</div>`;
 
   html += `</div>`;
 

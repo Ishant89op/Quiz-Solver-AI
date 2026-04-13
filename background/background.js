@@ -1,5 +1,5 @@
 import { callAI } from "./ai/index.js";
-import { MSG_TYPES, PROVIDERS, DEFAULT_MODELS } from "../shared/constants.js";
+import { MSG_TYPES, PROVIDERS, DEFAULT_MODELS, VISION_PROVIDERS } from "../shared/constants.js";
 import * as storage from "../shared/storage.js";
 import { parseJSON, estimateTokens } from "../shared/utils.js";
 
@@ -79,8 +79,9 @@ async function solveQuestion(message, sender) {
 
   let prompt = buildPrompt(question, options, questionType, userAnswer, settings);
 
+  // Only pass images to vision-capable providers
   let imageData = null;
-  if (imageBase64 && settings.includeScreenshot) {
+  if (imageBase64 && settings.includeScreenshot && VISION_PROVIDERS.includes(provider)) {
     imageData = imageBase64;
   }
 

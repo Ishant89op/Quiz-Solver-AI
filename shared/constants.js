@@ -45,6 +45,9 @@ export const MODELS = {
     { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", vision: true }
   ],
   [PROVIDERS.OPENAI]: [
+    { id: "gpt-4.1", label: "GPT-4.1", vision: true },
+    { id: "gpt-4.1-mini", label: "GPT-4.1 Mini", vision: true },
+    { id: "gpt-4.1-nano", label: "GPT-4.1 Nano", vision: true },
     { id: "gpt-4o", label: "GPT-4o", vision: true },
     { id: "gpt-4o-mini", label: "GPT-4o Mini", vision: true },
     { id: "gpt-4-turbo", label: "GPT-4 Turbo", vision: true },
@@ -52,9 +55,14 @@ export const MODELS = {
     { id: "o4-mini", label: "o4 Mini", vision: true }
   ],
   [PROVIDERS.GEMINI]: [
+    { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro", vision: true },
+    { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite", vision: true },
+    { id: "gemini-3-flash", label: "Gemini 3 Flash", vision: true },
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", vision: true },
     { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", vision: true },
-    { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", vision: true }
+    { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite", vision: true },
+    { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", vision: true },
+    { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite", vision: true }
   ],
   [PROVIDERS.QWEN]: [
     { id: "qwen-turbo", label: "Qwen Turbo", vision: false },
@@ -65,15 +73,35 @@ export const MODELS = {
   [PROVIDERS.MISTRAL]: [
     { id: "mistral-small-latest", label: "Mistral Small", vision: false },
     { id: "mistral-medium-latest", label: "Mistral Medium", vision: false },
-    { id: "mistral-large-latest", label: "Mistral Large", vision: false }
+    { id: "mistral-large-latest", label: "Mistral Large", vision: false },
+    { id: "pixtral-large-latest", label: "Pixtral Large", vision: true },
+    { id: "codestral-latest", label: "Codestral", vision: false }
   ],
   [PROVIDERS.GROQ]: [
     { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", vision: false },
     { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B", vision: false },
+    { id: "llama3-70b-8192", label: "Llama 3 70B", vision: false },
+    { id: "llama3-8b-8192", label: "Llama 3 8B", vision: false },
     { id: "mixtral-8x7b-32768", label: "Mixtral 8x7B", vision: false },
     { id: "gemma2-9b-it", label: "Gemma 2 9B", vision: false }
   ],
-  [PROVIDERS.OPENROUTER]: [],
+  [PROVIDERS.OPENROUTER]: [
+    { id: "google/gemini-2.5-flash-preview", label: "Gemini 2.5 Flash", vision: true },
+    { id: "google/gemini-2.5-pro-preview", label: "Gemini 2.5 Pro", vision: true },
+    { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4", vision: true },
+    { id: "anthropic/claude-haiku-4", label: "Claude Haiku 4", vision: true },
+    { id: "openai/gpt-4.1-mini", label: "GPT-4.1 Mini", vision: true },
+    { id: "openai/gpt-4o-mini", label: "GPT-4o Mini", vision: true },
+    { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B", vision: false },
+    { id: "meta-llama/llama-3.1-8b-instruct:free", label: "Llama 3.1 8B (Free)", vision: false },
+    { id: "mistralai/mistral-small-3.1-24b-instruct:free", label: "Mistral Small 3.1 (Free)", vision: false },
+    { id: "deepseek/deepseek-chat-v3-0324:free", label: "DeepSeek V3 (Free)", vision: false },
+    { id: "deepseek/deepseek-r1:free", label: "DeepSeek R1 (Free)", vision: false },
+    { id: "qwen/qwen-2.5-72b-instruct:free", label: "Qwen 2.5 72B (Free)", vision: false },
+    { id: "google/gemma-3-27b-it:free", label: "Gemma 3 27B (Free)", vision: false },
+    { id: "microsoft/phi-4:free", label: "Phi-4 (Free)", vision: false },
+    { id: "nousresearch/hermes-3-llama-3.1-405b:free", label: "Hermes 3 405B (Free)", vision: false }
+  ],
   [PROVIDERS.OLLAMA]: [],
   [PROVIDERS.CUSTOM]: []
 };
@@ -85,7 +113,7 @@ export const DEFAULT_MODELS = {
   [PROVIDERS.QWEN]: "qwen-plus",
   [PROVIDERS.MISTRAL]: "mistral-small-latest",
   [PROVIDERS.GROQ]: "llama-3.3-70b-versatile",
-  [PROVIDERS.OPENROUTER]: "",
+  [PROVIDERS.OPENROUTER]: "meta-llama/llama-3.1-8b-instruct:free",
   [PROVIDERS.OLLAMA]: "",
   [PROVIDERS.CUSTOM]: ""
 };
@@ -93,13 +121,15 @@ export const DEFAULT_MODELS = {
 export const DISPLAY_MODES = {
   FLOATING_DOT: "floatingDot",
   URL_HASH: "urlHash",
-  SIDEBAR: "sidebar"
+  SIDEBAR: "sidebar",
+  NONE: "none"
 };
 
 export const DISPLAY_MODE_LABELS = {
   [DISPLAY_MODES.FLOATING_DOT]: "Floating Dot",
   [DISPLAY_MODES.URL_HASH]: "URL Hash",
-  [DISPLAY_MODES.SIDEBAR]: "Sidebar Chat"
+  [DISPLAY_MODES.SIDEBAR]: "Sidebar Chat",
+  [DISPLAY_MODES.NONE]: "None (Auto-fill only)"
 };
 
 export const SCREENSHOT_MODES = {

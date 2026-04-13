@@ -143,31 +143,27 @@
         return;
       }
 
-      // Single question → auto-trigger
-      if (questions.length === 1) {
-        const q = questions[0];
+      for (const q of questions) {
         const hash = await hashQuestion(q.text, q.options);
-        if (!processedHashes.has(hash) || forceTrigger) {
-          processedHashes.add(hash);
-          await solveAndDisplay(q, hash);
-        }
-      }
-      // Multiple questions
-      else {
-        for (const q of questions) {
-          const hash = await hashQuestion(q.text, q.options);
 
-          // Auto-solve mode: trigger all questions automatically
-          if (settings.autoSolve) {
-            if (!processedHashes.has(hash) || forceTrigger) {
-              processedHashes.add(hash);
-              solveAndDisplay(q, hash);
-            }
-          } else {
-            // Manual mode: place a dot next to each question
-            if (!questionDots.has(hash)) {
-              placeDotOnQuestion(q, hash);
-            }
+        // Auto-solve mode: trigger all questions automatically
+        if (settings.autoSolve) {
+          if (!processedHashes.has(hash) || forceTrigger) {
+            processedHashes.add(hash);
+            solveAndDisplay(q, hash);
+          }
+        }
+        // Single question → auto-trigger
+        else if (questions.length === 1) {
+          if (!processedHashes.has(hash) || forceTrigger) {
+            processedHashes.add(hash);
+            await solveAndDisplay(q, hash);
+          }
+        }
+        // Multiple questions: place dots
+        else {
+          if (!questionDots.has(hash)) {
+            placeDotOnQuestion(q, hash);
           }
         }
       }
@@ -343,28 +339,24 @@
 
     const dot = document.createElement("div");
     dot.className = "qsa-question-dot";
-    dot.title = "Click to solve: " + question.text.slice(0, 50) + "...";
+    dot.title = "Click to solve";
     dot.setAttribute("data-qsa-hash", hash);
 
-    // Position relative to the question container
-    const container = question.element;
-    const containerStyle = window.getComputedStyle(container);
-    if (containerStyle.position === "static") {
-      container.style.position = "relative";
-    }
+    // Use fixed positioning based on element's screen coordinates
+    const rect = question.element.getBoundingClientRect();
 
     Object.assign(dot.style, {
-      position: "absolute",
-      top: "4px",
-      right: "4px",
-      width: "8px",
-      height: "8px",
+      position: "fixed",
+      top: (rect.top + 6) + "px",
+      left: (rect.left - 16) + "px",
+      width: "10px",
+      height: "10px",
       borderRadius: "50%",
       backgroundColor: "rgba(99, 102, 241, 0.45)",
       cursor: "pointer",
-      zIndex: "10000",
+      zIndex: "2147483640",
       transition: "all 0.2s ease",
-      boxShadow: "0 1px 3px rgba(0,0,0,0.15)"
+      boxShadow: "0 1px 4px rgba(0,0,0,0.2)"
     });
 
     dot.addEventListener("mouseenter", () => {
@@ -383,7 +375,6 @@
       e.stopPropagation();
       e.preventDefault();
 
-      // Pulse animation
       dot.style.transform = "scale(2.2)";
       setTimeout(() => { dot.style.transform = "scale(1)"; }, 300);
 
@@ -391,13 +382,25 @@
       await solveAndDisplay(question, hash);
     });
 
-    container.appendChild(dot);
-    questionDots.set(hash, { dot, question });
+    document.body.appendChild(dot);
+    questionDots.set(hash, { dot, question, element: question.element });
+
+    // Reposition on scroll
+    const repositionDot = () => {
+      if (!question.element.isConnected) { dot.remove(); return; }
+      const r = question.element.getBoundingClientRect();
+      dot.style.top = (r.top + 6) + "px";
+      dot.style.left = (r.left - 16) + "px";
+    };
+    window.addEventListener("scroll", repositionDot, { passive: true });
+    window.addEventListener("resize", repositionDot, { passive: true });
   }
 
   // ─── Display Answer ────────────────────────────────────────────────
   function displayAnswer(data, questionElement) {
     const mode = settings.displayMode || "floatingDot";
+
+    if (mode === "none") return; // Auto-fill only, no visual output
 
     switch (mode) {
       case "floatingDot":
