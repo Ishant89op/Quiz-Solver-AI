@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quiz Solver AI</title>
+  <link rel="stylesheet" href="popup.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="qsa-popup" id="qsa-popup">
+    <header class="qsa-header">
+      <div class="qsa-header-left">
+        <div class="qsa-logo">
+          <div class="qsa-logo-icon"></div>
+          <span class="qsa-logo-text">Quiz Solver AI</span>
+        </div>
+      </div>
+      <div class="qsa-header-right">
+        <label class="qsa-master-toggle" id="qsa-master-toggle">
+          <input type="checkbox" id="qsa-enabled-toggle" checked>
+          <span class="qsa-toggle-slider"></span>
+        </label>
+      </div>
+    </header>
+
+    <nav class="qsa-nav" id="qsa-nav">
+      <button class="qsa-nav-btn active" data-section="provider">Provider</button>
+      <button class="qsa-nav-btn" data-section="display">Display</button>
+      <button class="qsa-nav-btn" data-section="screenshot">Capture</button>
+      <button class="qsa-nav-btn" data-section="detection">Detection</button>
+      <button class="qsa-nav-btn" data-section="trigger">Trigger</button>
+      <button class="qsa-nav-btn" data-section="history">History</button>
+      <button class="qsa-nav-btn" data-section="privacy">Privacy</button>
+      <button class="qsa-nav-btn" data-section="appearance">Theme</button>
+    </nav>
+
+    <main class="qsa-content" id="qsa-content">
+      <section class="qsa-section active" id="section-provider"></section>
+      <section class="qsa-section" id="section-display"></section>
+      <section class="qsa-section" id="section-screenshot"></section>
+      <section class="qsa-section" id="section-detection"></section>
+      <section class="qsa-section" id="section-trigger"></section>
+      <section class="qsa-section" id="section-history"></section>
+      <section class="qsa-section" id="section-privacy"></section>
+      <section class="qsa-section" id="section-appearance"></section>
+    </main>
+
+    <footer class="qsa-footer">
+      <div class="qsa-token-counter" id="qsa-token-counter">Tokens: 0</div>
+      <div class="qsa-version">v1.0.0</div>
+    </footer>
+  </div>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
