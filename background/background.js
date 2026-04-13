@@ -1,5 +1,5 @@
 import { callAI } from "./ai/index.js";
-import { MSG_TYPES, PROVIDERS } from "../shared/constants.js";
+import { MSG_TYPES, PROVIDERS, DEFAULT_MODELS } from "../shared/constants.js";
 import * as storage from "../shared/storage.js";
 import { parseJSON, estimateTokens } from "../shared/utils.js";
 
@@ -70,7 +70,7 @@ async function solveQuestion(message, sender) {
 
   const provider = settings.provider;
   const apiKey = await storage.getApiKey(provider);
-  const model = await storage.getModel(provider) || "";
+  const model = await storage.getModel(provider) || DEFAULT_MODELS[provider] || "";
   const temperature = await storage.getTemperature(provider);
   const customEndpoint = await storage.getCustomEndpoint();
 

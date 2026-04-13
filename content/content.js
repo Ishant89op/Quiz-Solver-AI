@@ -6,21 +6,35 @@
   let observer = null;
   let isProcessing = false;
 
+  const LOG_PREFIX = "%c[Quiz Solver AI]";
+  const LOG_STYLE = "color: #6366f1; font-weight: bold;";
+
   async function init() {
+    console.log(LOG_PREFIX, LOG_STYLE, "Initializing...");
+
     try {
       const stored = await chrome.storage.local.get(null);
       settings = extractSettings(stored);
-    } catch {
+    } catch (e) {
+      console.warn(LOG_PREFIX, LOG_STYLE, "Failed to load settings:", e);
       settings = {};
     }
 
-    if (settings.enabled === false) return;
+    if (settings.enabled === false) {
+      console.log(LOG_PREFIX, LOG_STYLE, "Extension is disabled.");
+      return;
+    }
 
     const currentHost = window.location.hostname;
     if (settings.siteList && settings.siteList.length > 0) {
       const blocked = settings.siteList.find(s => s.host === currentHost && !s.enabled);
-      if (blocked) return;
+      if (blocked) {
+        console.log(LOG_PREFIX, LOG_STYLE, "Site is blocked:", currentHost);
+        return;
+      }
     }
+
+    console.log(LOG_PREFIX, LOG_STYLE, "Active on", currentHost, "| Provider:", settings.provider || "default", "| Display:", settings.displayMode || "floatingDot");
 
     scanPage();
     startObserver();
@@ -58,6 +72,7 @@
   function setupMessageListener() {
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg.type === "trigger_solve") {
+        console.log(LOG_PREFIX, LOG_STYLE, "Manual trigger received");
         scanPage(true);
         sendResponse({ ok: true });
       } else if (msg.type === "trigger_region_select") {
@@ -76,6 +91,7 @@
       const hotkey = settings.activationHotkey || "Alt+Shift+A";
       if (matchesHotkey(e, hotkey)) {
         e.preventDefault();
+        console.log(LOG_PREFIX, LOG_STYLE, "Hotkey activated");
         scanPage(true);
       }
 
@@ -113,6 +129,12 @@
 
     try {
       const questions = detectQuestions();
+      console.log(LOG_PREFIX, LOG_STYLE, `Detected ${questions.length} question(s)`, questions.map(q => ({ type: q.type, text: q.text.slice(0, 60) })));
+
+      if (questions.length === 0) {
+        isProcessing = false;
+        return;
+      }
 
       for (const q of questions) {
         const hash = await hashQuestion(q.text, q.options);
@@ -127,6 +149,8 @@
           imageBase64 = await captureQuestionImage(q.element);
         }
 
+        console.log(LOG_PREFIX, LOG_STYLE, "Sending to AI:", q.text.slice(0, 80));
+
         chrome.runtime.sendMessage({
           type: "solve_question",
           question: q.text,
@@ -136,19 +160,25 @@
           questionHash: hash,
           userAnswer: q.userAnswer || null
         }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error(LOG_PREFIX, LOG_STYLE, "Message error:", chrome.runtime.lastError.message);
+            return;
+          }
           if (response && response.type !== "error") {
+            console.log(LOG_PREFIX, LOG_STYLE, "Answer received:", response.answer);
             displayAnswer({
               ...response,
               question: q.text,
               userAnswer: q.userAnswer
             });
           } else if (response && response.error) {
+            console.error(LOG_PREFIX, LOG_STYLE, "AI error:", response.error);
             displayError(response.error);
           }
         });
       }
     } catch (err) {
-      // silent fail in content script
+      console.error(LOG_PREFIX, LOG_STYLE, "Scan error:", err);
     }
 
     isProcessing = false;
