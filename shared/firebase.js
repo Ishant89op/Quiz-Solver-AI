@@ -22,7 +22,7 @@ export async function signInWithGoogle() {
     // Use Firebase Auth's Google sign-in via launchWebAuthFlow
     const authUrl =
       `https://accounts.google.com/o/oauth2/v2/auth` +
-      `?client_id=${FIREBASE_CONFIG.messagingSenderId}-placeholder.apps.googleusercontent.com` +
+      `?client_id=124890716795-bgb9lkrkl158fg3n4sod02dvoijn0c1i.apps.googleusercontent.com` +
       `&response_type=token` +
       `&redirect_uri=${encodeURIComponent(redirectUrl)}` +
       `&scope=${scopes}`;

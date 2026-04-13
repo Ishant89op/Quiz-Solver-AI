@@ -207,23 +207,17 @@
           options: question.options
         };
 
-        // Auto-solve: try to auto-fill first
-        if (settings.autoSolve) {
-          const filled = tryAutoFill(question, response);
-          if (filled) {
-            console.log(LOG_PREFIX, LOG_STYLE, "Auto-filled answer");
-          }
+        // Always try to auto-fill
+        const filled = tryAutoFill(question, response);
+        if (filled) {
+          console.log(LOG_PREFIX, LOG_STYLE, "Auto-filled answer");
         }
 
-        // Always display via selected mode
+        // Display answer-only via selected mode (floatingDot, urlHash, none)
         displayAnswer(answerData, question.element);
 
-        // Update the dot for this question if it exists
-        const dotInfo = questionDots.get(hash);
-        if (dotInfo && dotInfo.dot) {
-          dotInfo.dot.classList.add("qsa-dot-solved");
-          dotInfo.dot.title = "Answer: " + (response.answer || "").slice(0, 60);
-        }
+        // Always push full explanation to sidebar (even if sidebar mode not selected)
+        addToSidebar(answerData);
       } else if (response && response.error) {
         console.error(LOG_PREFIX, LOG_STYLE, "AI error:", response.error);
         displayError(response.error);
@@ -348,35 +342,26 @@
       position: "fixed",
       top: (rect.top + 6) + "px",
       left: (rect.left - 16) + "px",
-      width: "10px",
-      height: "10px",
+      width: "6px",
+      height: "6px",
       borderRadius: "50%",
-      backgroundColor: "rgba(99, 102, 241, 0.45)",
+      backgroundColor: "rgba(140, 140, 140, 0.18)",
       cursor: "pointer",
       zIndex: "2147483640",
-      transition: "all 0.2s ease",
-      boxShadow: "0 1px 4px rgba(0,0,0,0.2)"
+      transition: "transform 0.15s ease"
     });
 
     dot.addEventListener("mouseenter", () => {
-      dot.style.transform = "scale(1.8)";
-      dot.style.backgroundColor = "rgba(99, 102, 241, 0.8)";
+      dot.style.transform = "scale(1.5)";
     });
 
     dot.addEventListener("mouseleave", () => {
-      if (!dot.classList.contains("qsa-dot-solved")) {
-        dot.style.transform = "scale(1)";
-        dot.style.backgroundColor = "rgba(99, 102, 241, 0.45)";
-      }
+      dot.style.transform = "scale(1)";
     });
 
     dot.addEventListener("click", async (e) => {
       e.stopPropagation();
       e.preventDefault();
-
-      dot.style.transform = "scale(2.2)";
-      setTimeout(() => { dot.style.transform = "scale(1)"; }, 300);
-
       console.log(LOG_PREFIX, LOG_STYLE, "Dot clicked for:", question.text.slice(0, 60));
       await solveAndDisplay(question, hash);
     });
@@ -396,10 +381,12 @@
   }
 
   // ─── Display Answer ────────────────────────────────────────────────
+  // This only handles answer-only display (dot/hash). Sidebar is always fed separately.
   function displayAnswer(data, questionElement) {
     const mode = settings.displayMode || "floatingDot";
 
-    if (mode === "none") return; // Auto-fill only, no visual output
+    // sidebar-only or none → no extra visual
+    if (mode === "none" || mode === "sidebar") return;
 
     switch (mode) {
       case "floatingDot":
@@ -408,14 +395,11 @@
       case "urlHash":
         showUrlHash(data);
         break;
-      case "sidebar":
-        addToSidebar(data);
-        break;
       default:
         showFloatingDot(data);
     }
 
-    if (settings.autoClearAnswer && mode !== "sidebar") {
+    if (settings.autoClearAnswer) {
       const delay = (settings.autoClearDelay || 10) * 1000;
       setTimeout(() => clearDisplays(), delay);
     }
@@ -438,21 +422,19 @@
     if (!dot) {
       dot = document.createElement("div");
       dot.className = "qsa-floating-dot";
-      const opacity = settings.overlayOpacity || 0.92;
       Object.assign(dot.style, {
         position: "fixed",
         bottom: "20px",
         right: "20px",
         top: "auto",
         left: "auto",
-        width: "12px",
-        height: "12px",
+        width: "8px",
+        height: "8px",
         borderRadius: "50%",
-        backgroundColor: "rgba(99, 102, 241, 0.5)",
+        backgroundColor: "rgba(140, 140, 140, 0.2)",
         cursor: "grab",
         zIndex: "2147483646",
-        transition: "background-color 0.3s, box-shadow 0.3s, transform 0.15s",
-        boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+        transition: "transform 0.15s",
         userSelect: "none",
         touchAction: "none"
       });
@@ -461,29 +443,29 @@
       card.className = "qsa-floating-card";
       Object.assign(card.style, {
         position: "fixed",
-        bottom: "40px",
+        bottom: "36px",
         right: "16px",
         top: "auto",
         left: "auto",
-        width: "300px",
-        maxHeight: "350px",
+        width: "240px",
+        maxHeight: "120px",
         overflowY: "auto",
-        backgroundColor: `rgba(24, 24, 32, ${opacity})`,
+        backgroundColor: "rgba(24, 24, 32, 0.92)",
         backdropFilter: "blur(16px)",
         WebkitBackdropFilter: "blur(16px)",
-        borderRadius: "12px",
-        padding: "16px",
+        borderRadius: "8px",
+        padding: "10px 14px",
         color: "#e2e8f0",
         fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
         fontSize: "13px",
-        lineHeight: "1.5",
-        boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
-        border: "1px solid rgba(255,255,255,0.08)",
+        lineHeight: "1.4",
+        boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
+        border: "1px solid rgba(255,255,255,0.06)",
         zIndex: "2147483646",
         display: "none",
         opacity: "0",
-        transform: "translateY(8px) scale(0.95)",
-        transition: "opacity 0.25s, transform 0.25s"
+        transform: "translateY(4px) scale(0.97)",
+        transition: "opacity 0.2s, transform 0.2s"
       });
 
       let pinned = false;
@@ -533,11 +515,11 @@
 
       dot.addEventListener("mouseenter", () => {
         if (!pinned && !isDragging) { positionCard(); showCard(); }
-        dot.style.backgroundColor = "rgba(99, 102, 241, 0.75)";
+        dot.style.transform = "scale(1.3)";
       });
 
       dot.addEventListener("mouseleave", () => {
-        dot.style.backgroundColor = "rgba(99, 102, 241, 0.5)";
+        dot.style.transform = "scale(1)";
         if (!pinned) {
           setTimeout(() => {
             if (!card.matches(":hover") && !pinned) hideCard();
@@ -552,8 +534,7 @@
       dot.addEventListener("click", () => {
         if (hasMoved) return;
         pinned = !pinned;
-        if (pinned) { positionCard(); showCard(); dot.style.boxShadow = "0 0 0 3px rgba(99,102,241,0.4), 0 2px 8px rgba(0,0,0,0.2)"; }
-        else { dot.style.boxShadow = "0 2px 8px rgba(0,0,0,0.2)"; }
+        if (pinned) { positionCard(); showCard(); }
       });
 
       function showCard() {
@@ -573,46 +554,9 @@
     updateCardContent(card, data);
   }
 
+  // Card only shows the answer — full explanations go to sidebar
   function updateCardContent(card, data) {
-    const showExplanation = settings.showExplanation !== false;
-    const showConfidence = settings.showConfidence !== false;
-
-    let html = "";
-
-    if (data.question) {
-      html += `<div style="font-size:11px; color:#94a3b8; margin-bottom:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">`;
-      html += escapeHtml(data.question.slice(0, 80));
-      html += `</div>`;
-    }
-
-    html += `<div style="font-weight:600; font-size:14px; margin-bottom:8px; color:#fff;">`;
-    html += escapeHtml(data.answer || "");
-    html += `</div>`;
-
-    if (data.userAnswer) {
-      const isCorrect = data.answer && data.userAnswer &&
-        data.answer.toLowerCase().includes(data.userAnswer.toLowerCase());
-      const diffColor = isCorrect ? "#22c55e" : "#ef4444";
-      html += `<div style="font-size:12px; margin-bottom:8px; padding:6px 8px; border-radius:6px; background:rgba(255,255,255,0.05);">`;
-      html += `<span style="color:#94a3b8;">You chose:</span> <span style="color:${diffColor};">${escapeHtml(data.userAnswer)}</span>`;
-      html += `</div>`;
-    }
-
-    if (showExplanation && data.explanation) {
-      html += `<div style="font-size:12px; color:#94a3b8; margin-bottom:8px; border-top:1px solid rgba(255,255,255,0.06); padding-top:8px;">`;
-      html += escapeHtml(data.explanation);
-      html += `</div>`;
-    }
-
-    if (showConfidence && data.confidence) {
-      const confColors = { high: "#22c55e", medium: "#f59e0b", low: "#ef4444" };
-      const color = confColors[data.confidence] || "#6366f1";
-      html += `<div style="display:inline-block; font-size:11px; font-weight:500; padding:2px 8px; border-radius:4px; background:${color}22; color:${color}; border:1px solid ${color}44;">`;
-      html += data.confidence;
-      html += `</div>`;
-    }
-
-    card.innerHTML = html;
+    card.innerHTML = `<div style="font-weight:500; font-size:13px; color:#e2e8f0;">${escapeHtml(data.answer || "")}</div>`;
   }
 
   // ─── URL Hash Display ──────────────────────────────────────────────
@@ -684,6 +628,70 @@
   function renderSidebarContent(sidebar) {
     sidebar.innerHTML = "";
 
+    // If not signed in, show mandatory sign-in screen
+    if (!sidebarState.user) {
+      const authScreen = document.createElement("div");
+      Object.assign(authScreen.style, {
+        flex: "1", display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center", padding: "40px 24px",
+        textAlign: "center", gap: "16px"
+      });
+
+      const icon = document.createElement("div");
+      Object.assign(icon.style, { fontSize: "32px" });
+      icon.textContent = "🔒";
+      authScreen.appendChild(icon);
+
+      const heading = document.createElement("div");
+      Object.assign(heading.style, { fontWeight: "600", fontSize: "15px", color: "#e2e8f0" });
+      heading.textContent = "Sign in to continue";
+      authScreen.appendChild(heading);
+
+      const desc = document.createElement("div");
+      Object.assign(desc.style, { fontSize: "12px", color: "#64748b", lineHeight: "1.5" });
+      desc.textContent = "Your chat history is saved to your account and persists across sessions.";
+      authScreen.appendChild(desc);
+
+      const loginBtn = document.createElement("button");
+      Object.assign(loginBtn.style, {
+        padding: "10px 24px", background: "rgba(99,102,241,0.8)",
+        border: "none", borderRadius: "8px", color: "#fff", cursor: "pointer",
+        fontSize: "13px", fontWeight: "500", marginTop: "8px"
+      });
+      loginBtn.textContent = "Sign in with Google";
+      loginBtn.addEventListener("click", () => {
+        loginBtn.textContent = "Signing in...";
+        loginBtn.disabled = true;
+        chrome.runtime.sendMessage({ type: "firebase_login" }, (res) => {
+          if (res && res.user) {
+            sidebarState.user = res.user;
+            loadChats(sidebar);
+          } else {
+            loginBtn.textContent = "Sign in with Google";
+            loginBtn.disabled = false;
+          }
+        });
+      });
+      authScreen.appendChild(loginBtn);
+
+      // Close button in corner
+      const closeBtn = document.createElement("button");
+      Object.assign(closeBtn.style, {
+        position: "absolute", top: "12px", right: "12px",
+        background: "none", border: "none", color: "#94a3b8",
+        cursor: "pointer", fontSize: "18px"
+      });
+      closeBtn.textContent = "×";
+      closeBtn.addEventListener("click", () => {
+        sidebar.style.transform = "translateX(100%)";
+        setTimeout(() => sidebar.remove(), 300);
+      });
+      sidebar.appendChild(closeBtn);
+      sidebar.appendChild(authScreen);
+      return;
+    }
+
+    // ─── Authenticated UI ────────────────────────────────────────────
     // Header
     const header = document.createElement("div");
     Object.assign(header.style, {
@@ -989,64 +997,40 @@
       fontSize: "11px"
     });
 
-    if (sidebarState.user) {
-      const userInfo = document.createElement("div");
-      Object.assign(userInfo.style, { display: "flex", alignItems: "center", gap: "6px", overflow: "hidden" });
+    // Auth is mandatory, so user is always signed in here
+    const userInfo = document.createElement("div");
+    Object.assign(userInfo.style, { display: "flex", alignItems: "center", gap: "6px", overflow: "hidden" });
 
-      if (sidebarState.user.photoUrl) {
-        const avatar = document.createElement("img");
-        avatar.src = sidebarState.user.photoUrl;
-        Object.assign(avatar.style, { width: "20px", height: "20px", borderRadius: "50%" });
-        userInfo.appendChild(avatar);
-      }
-
-      const name = document.createElement("span");
-      Object.assign(name.style, { color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
-      name.textContent = sidebarState.user.displayName || sidebarState.user.email;
-      userInfo.appendChild(name);
-      footer.appendChild(userInfo);
-
-      const logoutBtn = document.createElement("button");
-      Object.assign(logoutBtn.style, {
-        background: "none", border: "1px solid rgba(255,255,255,0.1)",
-        borderRadius: "4px", color: "#94a3b8", cursor: "pointer",
-        fontSize: "10px", padding: "3px 8px", flexShrink: "0"
-      });
-      logoutBtn.textContent = "Sign out";
-      logoutBtn.addEventListener("click", () => {
-        chrome.runtime.sendMessage({ type: "firebase_logout" }, () => {
-          sidebarState.user = null;
-          renderSidebarContent(sidebar);
-        });
-      });
-      footer.appendChild(logoutBtn);
-    } else {
-      // Show local mode info
-      const localInfo = document.createElement("span");
-      Object.assign(localInfo.style, { color: "#64748b" });
-      localInfo.textContent = `Local mode · ${sidebarState.chats.length} chat${sidebarState.chats.length !== 1 ? "s" : ""}`;
-      footer.appendChild(localInfo);
-
-      const syncBtn = document.createElement("button");
-      Object.assign(syncBtn.style, {
-        background: "none", border: "1px solid rgba(99,102,241,0.3)",
-        borderRadius: "4px", color: "#6366f1", cursor: "pointer",
-        fontSize: "10px", padding: "3px 8px", flexShrink: "0"
-      });
-      syncBtn.textContent = "☁ Sync";
-      syncBtn.title = "Sign in to sync chats to cloud";
-      syncBtn.addEventListener("click", () => {
-        syncBtn.textContent = "...";
-        syncBtn.disabled = true;
-        chrome.runtime.sendMessage({ type: "firebase_login" }, (res) => {
-          if (res && res.user) {
-            sidebarState.user = res.user;
-          }
-          renderSidebarContent(sidebar);
-        });
-      });
-      footer.appendChild(syncBtn);
+    if (sidebarState.user.photoUrl) {
+      const avatar = document.createElement("img");
+      avatar.src = sidebarState.user.photoUrl;
+      Object.assign(avatar.style, { width: "20px", height: "20px", borderRadius: "50%" });
+      userInfo.appendChild(avatar);
     }
+
+    const name = document.createElement("span");
+    Object.assign(name.style, { color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+    name.textContent = sidebarState.user.displayName || sidebarState.user.email;
+    userInfo.appendChild(name);
+    footer.appendChild(userInfo);
+
+    const logoutBtn = document.createElement("button");
+    Object.assign(logoutBtn.style, {
+      background: "none", border: "1px solid rgba(255,255,255,0.1)",
+      borderRadius: "4px", color: "#94a3b8", cursor: "pointer",
+      fontSize: "10px", padding: "3px 8px", flexShrink: "0"
+    });
+    logoutBtn.textContent = "Sign out";
+    logoutBtn.addEventListener("click", () => {
+      chrome.runtime.sendMessage({ type: "firebase_logout" }, () => {
+        sidebarState.user = null;
+        sidebarState.chats = [];
+        sidebarState.activeChatId = null;
+        sidebarState.activeMessages = [];
+        renderSidebarContent(sidebar);
+      });
+    });
+    footer.appendChild(logoutBtn);
 
     sidebar.appendChild(footer);
   }
