@@ -675,14 +675,8 @@
 
     document.body.appendChild(sidebar);
 
-    // Load user state
-    chrome.runtime.sendMessage({ type: "firebase_get_user" }, (res) => {
-      if (res && res.user) {
-        sidebarState.user = res.user;
-        loadChats(sidebar);
-      }
-      renderSidebarContent(sidebar);
-    });
+    // Load chats from local storage first (works without sign-in)
+    loadChats(sidebar);
 
     return sidebar;
   }
@@ -829,16 +823,17 @@
         delBtn.textContent = "🗑";
         delBtn.addEventListener("click", (e) => {
           e.stopPropagation();
-          if (sidebarState.user) {
-            chrome.runtime.sendMessage({ type: "firebase_delete_chat", chatId: chat.id }, () => {
-              sidebarState.chats = sidebarState.chats.filter(c => c.id !== chat.id);
-              if (sidebarState.activeChatId === chat.id) {
-                sidebarState.activeChatId = null;
-                sidebarState.activeMessages = [];
-              }
-              renderSidebarContent(sidebar);
-            });
+          sidebarState.chats = sidebarState.chats.filter(c => c.id !== chat.id);
+          if (sidebarState.activeChatId === chat.id) {
+            sidebarState.activeChatId = null;
+            sidebarState.activeMessages = [];
           }
+          saveChatsToLocal();
+          // Also delete from Firebase if signed in and not local
+          if (sidebarState.user && !chat.id.startsWith("local_")) {
+            chrome.runtime.sendMessage({ type: "firebase_delete_chat", chatId: chat.id });
+          }
+          renderSidebarContent(sidebar);
         });
         item.appendChild(delBtn);
 
@@ -1021,84 +1016,145 @@
       logoutBtn.addEventListener("click", () => {
         chrome.runtime.sendMessage({ type: "firebase_logout" }, () => {
           sidebarState.user = null;
-          sidebarState.chats = [];
           renderSidebarContent(sidebar);
         });
       });
       footer.appendChild(logoutBtn);
     } else {
-      const loginBtn = document.createElement("button");
-      Object.assign(loginBtn.style, {
-        width: "100%", padding: "8px",
-        background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)",
-        borderRadius: "6px", color: "#6366f1", cursor: "pointer",
-        fontSize: "12px", fontWeight: "500"
+      // Show local mode info
+      const localInfo = document.createElement("span");
+      Object.assign(localInfo.style, { color: "#64748b" });
+      localInfo.textContent = `Local mode · ${sidebarState.chats.length} chat${sidebarState.chats.length !== 1 ? "s" : ""}`;
+      footer.appendChild(localInfo);
+
+      const syncBtn = document.createElement("button");
+      Object.assign(syncBtn.style, {
+        background: "none", border: "1px solid rgba(99,102,241,0.3)",
+        borderRadius: "4px", color: "#6366f1", cursor: "pointer",
+        fontSize: "10px", padding: "3px 8px", flexShrink: "0"
       });
-      loginBtn.textContent = "Sign in with Google";
-      loginBtn.addEventListener("click", () => {
-        loginBtn.textContent = "Signing in...";
-        loginBtn.disabled = true;
+      syncBtn.textContent = "☁ Sync";
+      syncBtn.title = "Sign in to sync chats to cloud";
+      syncBtn.addEventListener("click", () => {
+        syncBtn.textContent = "...";
+        syncBtn.disabled = true;
         chrome.runtime.sendMessage({ type: "firebase_login" }, (res) => {
           if (res && res.user) {
             sidebarState.user = res.user;
-            loadChats(sidebar);
           }
           renderSidebarContent(sidebar);
         });
       });
-      footer.appendChild(loginBtn);
+      footer.appendChild(syncBtn);
     }
 
     sidebar.appendChild(footer);
   }
 
-  async function loadChats(sidebar) {
-    chrome.runtime.sendMessage({ type: "firebase_get_chats" }, (res) => {
-      if (res && res.chats) {
-        sidebarState.chats = res.chats;
-        // Auto-select the most recent chat
-        if (res.chats.length > 0 && !sidebarState.activeChatId) {
-          sidebarState.activeChatId = res.chats[0].id;
-          sidebarState.activeMessages = [...(res.chats[0].messages || [])];
-        }
+  function loadChats(sidebar) {
+    // Always load from chrome.storage.local first
+    chrome.storage.local.get("qsa_sidebar_chats", (result) => {
+      const localChats = result.qsa_sidebar_chats || [];
+      sidebarState.chats = localChats;
+
+      // Auto-select most recent chat or create first one
+      if (localChats.length > 0 && !sidebarState.activeChatId) {
+        sidebarState.activeChatId = localChats[0].id;
+        sidebarState.activeMessages = [...(localChats[0].messages || [])];
+      } else if (localChats.length === 0) {
+        // Create a default first chat
+        const firstChat = {
+          id: "local_" + Date.now(),
+          title: "Chat " + new Date().toLocaleTimeString(),
+          messages: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        sidebarState.chats = [firstChat];
+        sidebarState.activeChatId = firstChat.id;
+        sidebarState.activeMessages = [];
+        saveChatsToLocal();
       }
+
       renderSidebarContent(sidebar);
+
+      // Also check Firebase user (non-blocking)
+      chrome.runtime.sendMessage({ type: "firebase_get_user" }, (res) => {
+        if (res && res.user) {
+          sidebarState.user = res.user;
+          renderSidebarContent(sidebar);
+        }
+      });
     });
   }
 
   function createNewChat(sidebar) {
     const title = "Chat " + new Date().toLocaleTimeString();
+    const chatId = "local_" + Date.now();
+
+    const newChat = {
+      id: chatId,
+      title: title,
+      messages: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    sidebarState.chats.unshift(newChat);
+    sidebarState.activeChatId = chatId;
     sidebarState.activeMessages = [];
     sidebarState.view = "chat";
 
+    saveChatsToLocal();
+
+    // Also save to Firebase if logged in
     if (sidebarState.user) {
       chrome.runtime.sendMessage({ type: "firebase_create_chat", title }, (res) => {
         if (res && res.chat) {
+          // Update local ID to Firebase ID
+          newChat.id = res.chat.id;
           sidebarState.activeChatId = res.chat.id;
-          sidebarState.chats.unshift(res.chat);
+          saveChatsToLocal();
         }
-        renderSidebarContent(sidebar);
       });
-    } else {
-      sidebarState.activeChatId = "local_" + Date.now();
-      renderSidebarContent(sidebar);
     }
+
+    renderSidebarContent(sidebar);
   }
 
   function autoSaveChat() {
-    if (!sidebarState.user || !sidebarState.activeChatId) return;
-    if (sidebarState.activeChatId.startsWith("local_")) return;
+    if (!sidebarState.activeChatId) return;
 
     const nonLoadingMessages = sidebarState.activeMessages.filter(m => !m.loading);
-    chrome.runtime.sendMessage({
-      type: "firebase_save_messages",
-      chatId: sidebarState.activeChatId,
-      messages: nonLoadingMessages
-    });
 
-    // Update local cache
+    // Always save locally
     const chat = sidebarState.chats.find(c => c.id === sidebarState.activeChatId);
-    if (chat) chat.messages = [...nonLoadingMessages];
+    if (chat) {
+      chat.messages = [...nonLoadingMessages];
+      chat.updatedAt = new Date().toISOString();
+      // Auto-title from first user message
+      if (!chat.titleSet && nonLoadingMessages.length > 0) {
+        const firstUser = nonLoadingMessages.find(m => m.role === "user");
+        if (firstUser) {
+          chat.title = firstUser.content.slice(0, 40) + (firstUser.content.length > 40 ? "..." : "");
+          chat.titleSet = true;
+        }
+      }
+    }
+    saveChatsToLocal();
+
+    // Also sync to Firebase if logged in
+    if (sidebarState.user && !sidebarState.activeChatId.startsWith("local_")) {
+      chrome.runtime.sendMessage({
+        type: "firebase_save_messages",
+        chatId: sidebarState.activeChatId,
+        messages: nonLoadingMessages
+      });
+    }
+  }
+
+  function saveChatsToLocal() {
+    chrome.storage.local.set({ qsa_sidebar_chats: sidebarState.chats });
   }
 
   // ─── Clear Displays ────────────────────────────────────────────────
