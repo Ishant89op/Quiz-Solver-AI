@@ -6,7 +6,6 @@
   let debounceTimer = null;
   let observer = null;
   let isProcessing = false;
-  let sidebarConversation = [];
 
   const LOG_PREFIX = "%c[Quiz Solver AI]";
   const LOG_STYLE = "color: #6366f1; font-weight: bold;";
@@ -622,21 +621,30 @@
     window.location.hash = `answer-${answer}`;
   }
 
-  // ─── Sidebar Chat ─────────────────────────────────────────────────
+  // ─── Sidebar Chat (Leo Brave AI Style) ──────────────────────────────
+  let sidebarState = {
+    user: null,
+    chats: [],
+    activeChatId: null,
+    activeMessages: [],
+    view: "chat" // "list" or "chat"
+  };
+
   function addToSidebar(data) {
     const sidebar = getOrCreateSidebar();
 
-    // Add Q&A as conversation messages
+    // Add Q&A as messages
     if (data.question) {
-      sidebarConversation.push({ role: "user", content: data.question });
+      sidebarState.activeMessages.push({ role: "user", content: data.question, timestamp: new Date().toISOString() });
     }
 
     let aiMessage = data.answer || "";
     if (data.explanation) aiMessage += "\n\n" + data.explanation;
     if (data.confidence) aiMessage += "\n\n[Confidence: " + data.confidence + "]";
-    sidebarConversation.push({ role: "assistant", content: aiMessage });
+    sidebarState.activeMessages.push({ role: "assistant", content: aiMessage, timestamp: new Date().toISOString() });
 
-    renderSidebarMessages(sidebar);
+    renderSidebarContent(sidebar);
+    autoSaveChat();
   }
 
   function getOrCreateSidebar() {
@@ -649,11 +657,11 @@
       position: "fixed",
       top: "0",
       right: "0",
-      width: "320px",
+      width: "340px",
       height: "100vh",
-      backgroundColor: "rgba(15, 15, 23, 0.97)",
-      backdropFilter: "blur(20px)",
-      WebkitBackdropFilter: "blur(20px)",
+      backgroundColor: "rgba(12, 12, 20, 0.98)",
+      backdropFilter: "blur(24px)",
+      WebkitBackdropFilter: "blur(24px)",
       borderLeft: "1px solid rgba(255,255,255,0.06)",
       display: "flex",
       flexDirection: "column",
@@ -661,23 +669,76 @@
       fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
       fontSize: "13px",
       color: "#e2e8f0",
-      boxShadow: "-4px 0 24px rgba(0,0,0,0.3)",
-      transform: "translateX(0)",
+      boxShadow: "-4px 0 32px rgba(0,0,0,0.4)",
       transition: "transform 0.3s ease"
     });
+
+    document.body.appendChild(sidebar);
+
+    // Load user state
+    chrome.runtime.sendMessage({ type: "firebase_get_user" }, (res) => {
+      if (res && res.user) {
+        sidebarState.user = res.user;
+        loadChats(sidebar);
+      }
+      renderSidebarContent(sidebar);
+    });
+
+    return sidebar;
+  }
+
+  function renderSidebarContent(sidebar) {
+    sidebar.innerHTML = "";
 
     // Header
     const header = document.createElement("div");
     Object.assign(header.style, {
-      padding: "14px 16px",
+      padding: "12px 14px",
       borderBottom: "1px solid rgba(255,255,255,0.06)",
       display: "flex",
       alignItems: "center",
       justifyContent: "space-between",
       flexShrink: "0"
     });
-    header.innerHTML = `<span style="font-weight:600; font-size:14px;">Quiz Solver AI</span>`;
 
+    const headerLeft = document.createElement("div");
+    Object.assign(headerLeft.style, { display: "flex", alignItems: "center", gap: "8px" });
+
+    // Chat list toggle button
+    const listBtn = document.createElement("button");
+    Object.assign(listBtn.style, {
+      background: "none", border: "none", color: "#94a3b8",
+      cursor: "pointer", fontSize: "16px", padding: "2px 4px"
+    });
+    listBtn.textContent = "☰";
+    listBtn.title = "Chat list";
+    listBtn.addEventListener("click", () => {
+      sidebarState.view = sidebarState.view === "list" ? "chat" : "list";
+      renderSidebarContent(sidebar);
+    });
+    headerLeft.appendChild(listBtn);
+
+    const title = document.createElement("span");
+    Object.assign(title.style, { fontWeight: "600", fontSize: "14px" });
+    title.textContent = sidebarState.view === "list" ? "Chats" : "Quiz Solver AI";
+    headerLeft.appendChild(title);
+    header.appendChild(headerLeft);
+
+    const headerRight = document.createElement("div");
+    Object.assign(headerRight.style, { display: "flex", alignItems: "center", gap: "6px" });
+
+    // New chat button
+    const newChatBtn = document.createElement("button");
+    Object.assign(newChatBtn.style, {
+      background: "none", border: "none", color: "#6366f1",
+      cursor: "pointer", fontSize: "18px", padding: "2px 4px"
+    });
+    newChatBtn.textContent = "+";
+    newChatBtn.title = "New chat";
+    newChatBtn.addEventListener("click", () => createNewChat(sidebar));
+    headerRight.appendChild(newChatBtn);
+
+    // Close button
     const closeBtn = document.createElement("button");
     Object.assign(closeBtn.style, {
       background: "none", border: "none", color: "#94a3b8",
@@ -688,9 +749,107 @@
       sidebar.style.transform = "translateX(100%)";
       setTimeout(() => sidebar.remove(), 300);
     });
-    header.appendChild(closeBtn);
+    headerRight.appendChild(closeBtn);
+    header.appendChild(headerRight);
     sidebar.appendChild(header);
 
+    if (sidebarState.view === "list") {
+      renderChatList(sidebar);
+    } else {
+      renderChatView(sidebar);
+    }
+
+    // Footer: Auth
+    renderAuthFooter(sidebar);
+  }
+
+  function renderChatList(sidebar) {
+    const listArea = document.createElement("div");
+    Object.assign(listArea.style, {
+      flex: "1",
+      overflowY: "auto",
+      padding: "8px 10px",
+      display: "flex",
+      flexDirection: "column",
+      gap: "4px"
+    });
+
+    if (sidebarState.chats.length === 0) {
+      const empty = document.createElement("div");
+      Object.assign(empty.style, { textAlign: "center", padding: "40px 10px", color: "#64748b", fontSize: "12px" });
+      empty.textContent = sidebarState.user ? "No chats yet. Click + to start." : "Sign in to save chat history.";
+      listArea.appendChild(empty);
+    } else {
+      for (const chat of sidebarState.chats) {
+        const item = document.createElement("div");
+        Object.assign(item.style, {
+          padding: "10px 12px",
+          borderRadius: "8px",
+          cursor: "pointer",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          backgroundColor: chat.id === sidebarState.activeChatId ? "rgba(99,102,241,0.15)" : "rgba(255,255,255,0.03)",
+          border: chat.id === sidebarState.activeChatId ? "1px solid rgba(99,102,241,0.3)" : "1px solid transparent",
+          transition: "background 0.15s"
+        });
+
+        item.addEventListener("mouseenter", () => { if (chat.id !== sidebarState.activeChatId) item.style.backgroundColor = "rgba(255,255,255,0.06)"; });
+        item.addEventListener("mouseleave", () => { if (chat.id !== sidebarState.activeChatId) item.style.backgroundColor = "rgba(255,255,255,0.03)"; });
+
+        const textDiv = document.createElement("div");
+        Object.assign(textDiv.style, { overflow: "hidden" });
+
+        const titleEl = document.createElement("div");
+        Object.assign(titleEl.style, { fontSize: "12px", fontWeight: "500", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+        titleEl.textContent = chat.title;
+        textDiv.appendChild(titleEl);
+
+        const meta = document.createElement("div");
+        Object.assign(meta.style, { fontSize: "10px", color: "#64748b", marginTop: "2px" });
+        const msgCount = (chat.messages || []).length;
+        meta.textContent = `${msgCount} messages`;
+        textDiv.appendChild(meta);
+
+        item.appendChild(textDiv);
+
+        item.addEventListener("click", () => {
+          sidebarState.activeChatId = chat.id;
+          sidebarState.activeMessages = [...(chat.messages || [])];
+          sidebarState.view = "chat";
+          renderSidebarContent(sidebar);
+        });
+
+        // Delete button
+        const delBtn = document.createElement("button");
+        Object.assign(delBtn.style, {
+          background: "none", border: "none", color: "#64748b",
+          cursor: "pointer", fontSize: "14px", padding: "2px 4px", flexShrink: "0"
+        });
+        delBtn.textContent = "🗑";
+        delBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (sidebarState.user) {
+            chrome.runtime.sendMessage({ type: "firebase_delete_chat", chatId: chat.id }, () => {
+              sidebarState.chats = sidebarState.chats.filter(c => c.id !== chat.id);
+              if (sidebarState.activeChatId === chat.id) {
+                sidebarState.activeChatId = null;
+                sidebarState.activeMessages = [];
+              }
+              renderSidebarContent(sidebar);
+            });
+          }
+        });
+        item.appendChild(delBtn);
+
+        listArea.appendChild(item);
+      }
+    }
+
+    sidebar.appendChild(listArea);
+  }
+
+  function renderChatView(sidebar) {
     // Messages area
     const messagesArea = document.createElement("div");
     messagesArea.className = "qsa-sidebar-messages";
@@ -702,7 +861,45 @@
       flexDirection: "column",
       gap: "10px"
     });
+
+    if (sidebarState.activeMessages.length === 0) {
+      const welcome = document.createElement("div");
+      Object.assign(welcome.style, { textAlign: "center", padding: "40px 10px", color: "#64748b", fontSize: "12px" });
+      welcome.textContent = "Ask me anything about your quiz!";
+      messagesArea.appendChild(welcome);
+    } else {
+      for (const msg of sidebarState.activeMessages) {
+        const bubble = document.createElement("div");
+        const isUser = msg.role === "user";
+
+        Object.assign(bubble.style, {
+          padding: "10px 14px",
+          borderRadius: "12px",
+          maxWidth: "90%",
+          wordBreak: "break-word",
+          whiteSpace: "pre-wrap",
+          fontSize: "13px",
+          lineHeight: "1.5",
+          alignSelf: isUser ? "flex-end" : "flex-start",
+          backgroundColor: isUser ? "rgba(99, 102, 241, 0.2)" : "rgba(255,255,255,0.05)",
+          border: `1px solid ${isUser ? "rgba(99,102,241,0.3)" : "rgba(255,255,255,0.06)"}`,
+          color: "#e2e8f0"
+        });
+
+        if (msg.loading) {
+          bubble.style.opacity = "0.6";
+          bubble.style.fontStyle = "italic";
+        }
+
+        bubble.textContent = msg.content;
+        messagesArea.appendChild(bubble);
+      }
+    }
+
     sidebar.appendChild(messagesArea);
+
+    // Scroll to bottom
+    requestAnimationFrame(() => { messagesArea.scrollTop = messagesArea.scrollHeight; });
 
     // Input area
     const inputArea = document.createElement("div");
@@ -747,29 +944,25 @@
       const text = input.value.trim();
       if (!text) return;
 
-      sidebarConversation.push({ role: "user", content: text });
-      renderSidebarMessages(sidebar);
+      sidebarState.activeMessages.push({ role: "user", content: text, timestamp: new Date().toISOString() });
+      sidebarState.activeMessages.push({ role: "assistant", content: "Thinking...", loading: true });
+      renderSidebarContent(sidebar);
       input.value = "";
-
-      // Add loading indicator
-      const loadingMsg = { role: "assistant", content: "Thinking...", loading: true };
-      sidebarConversation.push(loadingMsg);
-      renderSidebarMessages(sidebar);
 
       chrome.runtime.sendMessage({
         type: "chat_message",
         userMessage: text,
-        conversationHistory: sidebarConversation.filter(m => !m.loading)
+        conversationHistory: sidebarState.activeMessages.filter(m => !m.loading)
       }, (response) => {
-        // Remove loading message
-        sidebarConversation = sidebarConversation.filter(m => !m.loading);
+        sidebarState.activeMessages = sidebarState.activeMessages.filter(m => !m.loading);
 
         if (response && response.type === "chat_response") {
-          sidebarConversation.push({ role: "assistant", content: response.response });
+          sidebarState.activeMessages.push({ role: "assistant", content: response.response, timestamp: new Date().toISOString() });
         } else {
-          sidebarConversation.push({ role: "assistant", content: "Error: " + (response?.error || "Failed to get response") });
+          sidebarState.activeMessages.push({ role: "assistant", content: "Error: " + (response?.error || "Failed"), timestamp: new Date().toISOString() });
         }
-        renderSidebarMessages(sidebar);
+        renderSidebarContent(sidebar);
+        autoSaveChat();
       });
     }
 
@@ -785,45 +978,127 @@
     inputArea.appendChild(sendBtn);
     sidebar.appendChild(inputArea);
 
-    document.body.appendChild(sidebar);
-    return sidebar;
+    // Focus input
+    requestAnimationFrame(() => input.focus());
   }
 
-  function renderSidebarMessages(sidebar) {
-    const messagesArea = sidebar.querySelector(".qsa-sidebar-messages");
-    if (!messagesArea) return;
+  function renderAuthFooter(sidebar) {
+    const footer = document.createElement("div");
+    Object.assign(footer.style, {
+      padding: "10px 14px",
+      borderTop: "1px solid rgba(255,255,255,0.06)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      flexShrink: "0",
+      fontSize: "11px"
+    });
 
-    messagesArea.innerHTML = "";
+    if (sidebarState.user) {
+      const userInfo = document.createElement("div");
+      Object.assign(userInfo.style, { display: "flex", alignItems: "center", gap: "6px", overflow: "hidden" });
 
-    for (const msg of sidebarConversation) {
-      const bubble = document.createElement("div");
-      const isUser = msg.role === "user";
-
-      Object.assign(bubble.style, {
-        padding: "10px 14px",
-        borderRadius: "12px",
-        maxWidth: "90%",
-        wordBreak: "break-word",
-        whiteSpace: "pre-wrap",
-        fontSize: "13px",
-        lineHeight: "1.5",
-        alignSelf: isUser ? "flex-end" : "flex-start",
-        backgroundColor: isUser ? "rgba(99, 102, 241, 0.2)" : "rgba(255,255,255,0.05)",
-        border: `1px solid ${isUser ? "rgba(99,102,241,0.3)" : "rgba(255,255,255,0.06)"}`,
-        color: "#e2e8f0"
-      });
-
-      if (msg.loading) {
-        bubble.style.opacity = "0.6";
-        bubble.style.fontStyle = "italic";
+      if (sidebarState.user.photoUrl) {
+        const avatar = document.createElement("img");
+        avatar.src = sidebarState.user.photoUrl;
+        Object.assign(avatar.style, { width: "20px", height: "20px", borderRadius: "50%" });
+        userInfo.appendChild(avatar);
       }
 
-      bubble.textContent = msg.content;
-      messagesArea.appendChild(bubble);
+      const name = document.createElement("span");
+      Object.assign(name.style, { color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+      name.textContent = sidebarState.user.displayName || sidebarState.user.email;
+      userInfo.appendChild(name);
+      footer.appendChild(userInfo);
+
+      const logoutBtn = document.createElement("button");
+      Object.assign(logoutBtn.style, {
+        background: "none", border: "1px solid rgba(255,255,255,0.1)",
+        borderRadius: "4px", color: "#94a3b8", cursor: "pointer",
+        fontSize: "10px", padding: "3px 8px", flexShrink: "0"
+      });
+      logoutBtn.textContent = "Sign out";
+      logoutBtn.addEventListener("click", () => {
+        chrome.runtime.sendMessage({ type: "firebase_logout" }, () => {
+          sidebarState.user = null;
+          sidebarState.chats = [];
+          renderSidebarContent(sidebar);
+        });
+      });
+      footer.appendChild(logoutBtn);
+    } else {
+      const loginBtn = document.createElement("button");
+      Object.assign(loginBtn.style, {
+        width: "100%", padding: "8px",
+        background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)",
+        borderRadius: "6px", color: "#6366f1", cursor: "pointer",
+        fontSize: "12px", fontWeight: "500"
+      });
+      loginBtn.textContent = "Sign in with Google";
+      loginBtn.addEventListener("click", () => {
+        loginBtn.textContent = "Signing in...";
+        loginBtn.disabled = true;
+        chrome.runtime.sendMessage({ type: "firebase_login" }, (res) => {
+          if (res && res.user) {
+            sidebarState.user = res.user;
+            loadChats(sidebar);
+          }
+          renderSidebarContent(sidebar);
+        });
+      });
+      footer.appendChild(loginBtn);
     }
 
-    // Auto scroll to bottom
-    messagesArea.scrollTop = messagesArea.scrollHeight;
+    sidebar.appendChild(footer);
+  }
+
+  async function loadChats(sidebar) {
+    chrome.runtime.sendMessage({ type: "firebase_get_chats" }, (res) => {
+      if (res && res.chats) {
+        sidebarState.chats = res.chats;
+        // Auto-select the most recent chat
+        if (res.chats.length > 0 && !sidebarState.activeChatId) {
+          sidebarState.activeChatId = res.chats[0].id;
+          sidebarState.activeMessages = [...(res.chats[0].messages || [])];
+        }
+      }
+      renderSidebarContent(sidebar);
+    });
+  }
+
+  function createNewChat(sidebar) {
+    const title = "Chat " + new Date().toLocaleTimeString();
+    sidebarState.activeMessages = [];
+    sidebarState.view = "chat";
+
+    if (sidebarState.user) {
+      chrome.runtime.sendMessage({ type: "firebase_create_chat", title }, (res) => {
+        if (res && res.chat) {
+          sidebarState.activeChatId = res.chat.id;
+          sidebarState.chats.unshift(res.chat);
+        }
+        renderSidebarContent(sidebar);
+      });
+    } else {
+      sidebarState.activeChatId = "local_" + Date.now();
+      renderSidebarContent(sidebar);
+    }
+  }
+
+  function autoSaveChat() {
+    if (!sidebarState.user || !sidebarState.activeChatId) return;
+    if (sidebarState.activeChatId.startsWith("local_")) return;
+
+    const nonLoadingMessages = sidebarState.activeMessages.filter(m => !m.loading);
+    chrome.runtime.sendMessage({
+      type: "firebase_save_messages",
+      chatId: sidebarState.activeChatId,
+      messages: nonLoadingMessages
+    });
+
+    // Update local cache
+    const chat = sidebarState.chats.find(c => c.id === sidebarState.activeChatId);
+    if (chat) chat.messages = [...nonLoadingMessages];
   }
 
   // ─── Clear Displays ────────────────────────────────────────────────

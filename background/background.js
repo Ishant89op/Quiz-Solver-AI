@@ -2,6 +2,7 @@ import { callAI } from "./ai/index.js";
 import { MSG_TYPES, PROVIDERS, DEFAULT_MODELS, VISION_PROVIDERS } from "../shared/constants.js";
 import * as storage from "../shared/storage.js";
 import { parseJSON, estimateTokens } from "../shared/utils.js";
+import * as firebase from "../shared/firebase.js";
 
 const sessionHistory = [];
 
@@ -56,6 +57,64 @@ async function handleMessage(message, sender) {
 
     case "chat_message":
       return await handleChatMessage(message);
+
+    // Firebase Auth
+    case "firebase_login":
+      try {
+        const user = await firebase.signInWithGoogle();
+        return { type: "firebase_login_success", user };
+      } catch (err) {
+        return { type: MSG_TYPES.ERROR, error: err.message };
+      }
+
+    case "firebase_logout":
+      await firebase.signOut();
+      return { type: "firebase_logout_success" };
+
+    case "firebase_get_user":
+      const currentUser = await firebase.getCurrentUser();
+      return { type: "firebase_user", user: currentUser };
+
+    // Firebase Chat CRUD
+    case "firebase_get_chats":
+      try {
+        const user2 = await firebase.getCurrentUser();
+        if (!user2) return { type: MSG_TYPES.ERROR, error: "Not logged in" };
+        const chats = await firebase.getChats(user2.uid, user2.idToken);
+        return { type: "firebase_chats", chats };
+      } catch (err) {
+        return { type: MSG_TYPES.ERROR, error: err.message };
+      }
+
+    case "firebase_create_chat":
+      try {
+        const user3 = await firebase.getCurrentUser();
+        if (!user3) return { type: MSG_TYPES.ERROR, error: "Not logged in" };
+        const chat = await firebase.createChat(user3.uid, user3.idToken, message.title);
+        return { type: "firebase_chat_created", chat };
+      } catch (err) {
+        return { type: MSG_TYPES.ERROR, error: err.message };
+      }
+
+    case "firebase_save_messages":
+      try {
+        const user4 = await firebase.getCurrentUser();
+        if (!user4) return { type: MSG_TYPES.ERROR, error: "Not logged in" };
+        await firebase.addMessageToChat(user4.uid, user4.idToken, message.chatId, message.messages);
+        return { type: "firebase_messages_saved" };
+      } catch (err) {
+        return { type: MSG_TYPES.ERROR, error: err.message };
+      }
+
+    case "firebase_delete_chat":
+      try {
+        const user5 = await firebase.getCurrentUser();
+        if (!user5) return { type: MSG_TYPES.ERROR, error: "Not logged in" };
+        await firebase.deleteChat(user5.uid, user5.idToken, message.chatId);
+        return { type: "firebase_chat_deleted" };
+      } catch (err) {
+        return { type: MSG_TYPES.ERROR, error: err.message };
+      }
 
     default:
       return { type: MSG_TYPES.ERROR, error: "Unknown message type" };
