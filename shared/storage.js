@@ -41,11 +41,15 @@ export async function saveSettings(settingsObj) {
 }
 
 export async function getApiKey(provider) {
+  try {
+    const { getKey, hasKey } = await import("./keys.js");
+    if (hasKey(provider)) {
+      return getKey(provider);
+    }
+  } catch {
+    // vault module unavailable, skip
+  }
   return await get(`apikey_${provider}`);
-}
-
-export async function setApiKey(provider, key) {
-  await set(`apikey_${provider}`, key);
 }
 
 export async function getModel(provider) {

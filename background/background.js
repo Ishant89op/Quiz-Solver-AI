@@ -150,7 +150,8 @@ function buildPrompt(question, options, questionType, userAnswer, settings) {
 }
 
 async function testConnection(message) {
-  const { provider, apiKey, model, customEndpoint } = message;
+  const { provider, model, customEndpoint } = message;
+  const apiKey = await storage.getApiKey(provider);
 
   const config = {
     apiKey,

@@ -111,21 +111,12 @@ export function saveSetting(key, value) {
   chrome.storage.local.set({ [`${STORAGE_PREFIX}${key}`]: value });
 }
 
-export function saveApiKey(provider, key) {
-  chrome.storage.local.set({ [`${STORAGE_PREFIX}apikey_${provider}`]: key });
-}
-
 export function saveModel(provider, model) {
   chrome.storage.local.set({ [`${STORAGE_PREFIX}model_${provider}`]: model });
 }
 
 export function saveTemperature(provider, temp) {
   chrome.storage.local.set({ [`${STORAGE_PREFIX}temperature_${provider}`]: temp });
-}
-
-export async function getApiKey(provider) {
-  const result = await chrome.storage.local.get(`${STORAGE_PREFIX}apikey_${provider}`);
-  return result[`${STORAGE_PREFIX}apikey_${provider}`] || "";
 }
 
 export async function getModel(provider) {
@@ -139,3 +130,4 @@ export async function getTemperature(provider) {
 }
 
 export { applyTheme };
+

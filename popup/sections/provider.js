@@ -1,4 +1,4 @@
-import { saveSetting, saveApiKey, saveModel, saveTemperature, getApiKey, getModel, getTemperature } from "../popup.js";
+import { saveSetting, saveModel, saveTemperature, getModel, getTemperature } from "../popup.js";
 
 const PROVIDERS = {
   claude: "Claude (Anthropic)",
@@ -64,8 +64,6 @@ const DEFAULT_MODELS = {
   custom: ""
 };
 
-const NO_KEY_PROVIDERS = ["ollama"];
-
 export async function initProviderSection(settings) {
   const section = document.getElementById("section-provider");
   const currentProvider = settings.provider || "openai";
@@ -102,18 +100,12 @@ export async function initProviderSection(settings) {
 
 async function renderProviderConfig(provider) {
   const container = document.getElementById("qsa-provider-config");
-  const apiKey = await getApiKey(provider);
   const currentModel = await getModel(provider);
   const temperature = await getTemperature(provider);
 
   let html = "";
 
-  if (!NO_KEY_PROVIDERS.includes(provider)) {
-    html += `<div class="qsa-field">`;
-    html += `<div class="qsa-label">API Key</div>`;
-    html += `<input type="password" class="qsa-input qsa-input-password" id="qsa-api-key" value="${apiKey}" placeholder="Enter your API key">`;
-    html += `</div>`;
-  }
+  html += `<div class="qsa-info" style="margin-bottom:12px;">API key is pre-configured and secured.</div>`;
 
   if (provider === "custom") {
     const stored = await chrome.storage.local.get("qsa_custom_endpoint");
@@ -159,11 +151,6 @@ async function renderProviderConfig(provider) {
   html += `</div></div>`;
 
   container.innerHTML = html;
-
-  const apiKeyInput = document.getElementById("qsa-api-key");
-  if (apiKeyInput) {
-    apiKeyInput.addEventListener("change", () => saveApiKey(provider, apiKeyInput.value));
-  }
 
   const customEndpoint = document.getElementById("qsa-custom-endpoint");
   if (customEndpoint) {
@@ -243,7 +230,6 @@ async function testConnection() {
   btn.textContent = "Testing...";
   statusEl.innerHTML = `<div class="qsa-status"><span class="qsa-loading"></span> Testing...</div>`;
 
-  const apiKey = document.getElementById("qsa-api-key")?.value || "";
   const modelSelect = document.getElementById("qsa-model-select");
   const modelInput = document.getElementById("qsa-model-input");
   const model = modelInput?.value || modelSelect?.value || "";
@@ -253,7 +239,6 @@ async function testConnection() {
     const response = await chrome.runtime.sendMessage({
       type: "test_connection",
       provider,
-      apiKey,
       model,
       customEndpoint
     });

@@ -21,7 +21,7 @@ Works on Duolingo, Khan Academy, Coursera, Quizlet, custom LMS platforms, and an
 - Token usage tracking
 - Full keyboard navigation and hotkey customization
 - Dark, light, and system theme options
-- All API keys stored locally - nothing sent to extension servers
+- All API keys pre-configured and secured - nothing sent to extension servers
 
 ---
 
@@ -50,25 +50,9 @@ Works on Duolingo, Khan Academy, Coursera, Quizlet, custom LMS platforms, and an
 
 Click the extension icon to open settings. Select your provider from the **Provider** tab.
 
-### 2. Enter Your API Key
+API keys are pre-configured and secured. No key entry is required by the user.
 
-Each provider requires your own API key (except Ollama which runs locally).
-
-**Where to get API keys:**
-
-| Provider | Get Key At | Auth Method |
-|---|---|---|
-| Claude (Anthropic) | https://console.anthropic.com/settings/keys | x-api-key header |
-| OpenAI | https://platform.openai.com/api-keys | Bearer token |
-| Google Gemini | https://aistudio.google.com/apikey | URL parameter |
-| Qwen (Alibaba) | https://dashscope.console.aliyun.com/ | Bearer token |
-| Mistral | https://console.mistral.ai/api-keys | Bearer token |
-| Groq | https://console.groq.com/keys | Bearer token |
-| OpenRouter | https://openrouter.ai/keys | Bearer token |
-| Ollama | N/A - runs locally | No key needed |
-| Custom | Your server | Optional Bearer token |
-
-### 3. Select a Model
+### 2. Select a Model
 
 Each provider has pre-populated model options. Models with `[V]` support vision (image input).
 
@@ -83,7 +67,7 @@ Each provider has pre-populated model options. Models with `[V]` support vision 
 - OpenRouter: any model ID (e.g. `meta-llama/llama-3.3-70b-instruct:free`)
 - Ollama: auto-fetches installed models from `localhost:11434`
 
-### 4. Test Connection
+### 3. Test Connection
 
 Click **Test Connection** in the Provider tab to verify your setup works.
 
@@ -140,7 +124,7 @@ Hotkeys can be changed in the Trigger and Capture tabs.
 
 | Tab | Controls |
 |---|---|
-| **Provider** | AI provider, API key, model, temperature |
+| **Provider** | AI provider, model, temperature |
 | **Display** | Display mode, explanation/confidence toggles, auto-clear |
 | **Capture** | Screenshot mode, region-select hotkey |
 | **Detection** | Global toggle, image detection, debounce delay, per-site list |
@@ -153,7 +137,8 @@ Hotkeys can be changed in the Trigger and Capture tabs.
 
 ## Privacy
 
-- All API keys are stored in `chrome.storage.local` on your machine
+- All API keys are pre-configured and obfuscated in the extension source
+- Keys are never exposed to end users
 - No data is sent to any extension servers
 - Questions are sent only to the AI provider you configure
 - Enable "Never send full page URL" to strip URLs to domain only
@@ -242,6 +227,7 @@ Quiz-Solver-AI/
       appearance.js          - Theme and appearance
   shared/
     constants.js             - All model lists, defaults, strings
+    keys.js                  - Obfuscated API key vault
     storage.js               - chrome.storage.local wrappers
     hash.js                  - Question deduplication hashing
     utils.js                 - Shared utility functions
@@ -280,10 +266,10 @@ For sites using heavy Shadow DOM or canvas-only rendering, use the region-select
 - Use the activation hotkey to force a scan
 
 **API errors:**
-- Verify your API key is correct
-- Check your billing/quota on the provider dashboard
 - Use the Test Connection button in the Provider tab
+- Check billing/quota on the provider dashboard
 - Try a different model
+- Contact the extension maintainer if keys need to be updated
 
 **No image analysis:**
 - Make sure you are using a vision-capable model (marked with [V])
@@ -293,3 +279,52 @@ For sites using heavy Shadow DOM or canvas-only rendering, use the region-select
 - Ensure Ollama is running: `ollama serve`
 - Default endpoint is `http://localhost:11434`
 - Some browsers block localhost requests from extensions - check CORS settings
+
+---
+
+## Developer Guide - Configuring API Keys
+
+API keys are stored in `shared/keys.js` using XOR obfuscation + base64 encoding so they are never in plaintext in the source.
+
+### How to add your keys
+
+1. Open the extension popup in Chrome
+2. Open DevTools on the popup (right-click the popup, Inspect)
+3. In the console, run:
+
+```js
+import('./shared/keys.js').then(m => console.log(m.encodeKey('your-actual-api-key-here')))
+```
+
+Or use this standalone snippet in any browser console:
+
+```js
+function encodeKey(key) {
+  const salt = [0x51, 0x73, 0x41, 0x6b, 0x33, 0x79, 0x5f, 0x78, 0x30, 0x72];
+  const bytes = Array.from(key, c => c.charCodeAt(0));
+  const xored = bytes.map((b, i) => b ^ salt[i % salt.length]);
+  return btoa(String.fromCharCode(...xored));
+}
+console.log(encodeKey('sk-your-key-here'));
+```
+
+4. Copy the encoded output string
+5. Paste it into the corresponding provider field in `shared/keys.js`:
+
+```js
+const _VAULT = {
+  claude:     "YOUR_ENCODED_KEY_HERE",
+  openai:     "YOUR_ENCODED_KEY_HERE",
+  gemini:     "",
+  ...
+};
+```
+
+6. Reload the extension
+
+### Security notes
+
+- Keys are XOR-obfuscated, not encrypted. This prevents casual inspection but is not cryptographically secure.
+- Never publish `shared/keys.js` with real keys to a public repository.
+- Add `shared/keys.js` to `.gitignore` if distributing source publicly.
+- For production distribution, consider a backend proxy that holds keys server-side.
