@@ -1,12 +1,9 @@
 import { saveSetting } from "../popup.js";
 
 const DISPLAY_MODES = [
-  { id: "floatingDot", label: "Floating Dot", desc: "Small circle bottom-right, hover to expand" },
+  { id: "floatingDot", label: "Floating Dot", desc: "Small dot near answers, hover to expand card" },
   { id: "urlHash", label: "URL Hash", desc: "Answer written to address bar hash only" },
-  { id: "consoleLog", label: "Console Log", desc: "Styled output in DevTools console" },
-  { id: "sidebar", label: "Sidebar Panel", desc: "Collapsible panel with answer history" },
-  { id: "tooltip", label: "Tooltip on Selection", desc: "Appears above selected question text" },
-  { id: "hiddenField", label: "Hidden Field", desc: "Invisible input, accessible via hotkey" }
+  { id: "sidebar", label: "Sidebar Chat", desc: "Persistent chat panel with full conversation" }
 ];
 
 export function initDisplaySection(settings) {
@@ -26,6 +23,19 @@ export function initDisplaySection(settings) {
   }
 
   html += `</div></div>`;
+
+  html += `<div class="qsa-divider"></div>`;
+
+  html += `<div class="qsa-group">`;
+  html += `<div class="qsa-group-title">Auto Solve</div>`;
+
+  html += `<div class="qsa-toggle-row">`;
+  html += `<span class="qsa-toggle-label">Enable Auto-Solve</span>`;
+  html += `<label class="qsa-toggle"><input type="checkbox" id="qsa-auto-solve" ${settings.autoSolve ? "checked" : ""}><span class="qsa-toggle-track"></span></label>`;
+  html += `</div>`;
+  html += `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Automatically detects all questions, triggers AI for each, and auto-fills answers when possible. If auto-fill isn't possible, answers are shown via your selected display mode.</div>`;
+
+  html += `</div>`;
 
   html += `<div class="qsa-divider"></div>`;
 
@@ -58,8 +68,13 @@ export function initDisplaySection(settings) {
 
   section.innerHTML = html;
 
+  // Event listeners
   section.querySelectorAll('input[name="displayMode"]').forEach(radio => {
     radio.addEventListener("change", () => saveSetting("displayMode", radio.value));
+  });
+
+  document.getElementById("qsa-auto-solve").addEventListener("change", (e) => {
+    saveSetting("autoSolve", e.target.checked);
   });
 
   document.getElementById("qsa-show-explanation").addEventListener("change", (e) => {

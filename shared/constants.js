@@ -93,19 +93,13 @@ export const DEFAULT_MODELS = {
 export const DISPLAY_MODES = {
   FLOATING_DOT: "floatingDot",
   URL_HASH: "urlHash",
-  CONSOLE_LOG: "consoleLog",
-  SIDEBAR: "sidebar",
-  TOOLTIP: "tooltip",
-  HIDDEN_FIELD: "hiddenField"
+  SIDEBAR: "sidebar"
 };
 
 export const DISPLAY_MODE_LABELS = {
   [DISPLAY_MODES.FLOATING_DOT]: "Floating Dot",
   [DISPLAY_MODES.URL_HASH]: "URL Hash",
-  [DISPLAY_MODES.CONSOLE_LOG]: "Console Log",
-  [DISPLAY_MODES.SIDEBAR]: "Sidebar Panel",
-  [DISPLAY_MODES.TOOLTIP]: "Tooltip on Selection",
-  [DISPLAY_MODES.HIDDEN_FIELD]: "Hidden Field"
+  [DISPLAY_MODES.SIDEBAR]: "Sidebar Chat"
 };
 
 export const SCREENSHOT_MODES = {
@@ -160,6 +154,7 @@ export const DEFAULT_SETTINGS = {
   displayMode: DISPLAY_MODES.FLOATING_DOT,
   screenshotMode: SCREENSHOT_MODES.AUTO_CAPTURE,
   enabled: true,
+  autoSolve: false,
   autoTrigger: true,
   triggerAfterInteraction: false,
   showExplanation: true,

@@ -54,6 +54,9 @@ async function handleMessage(message, sender) {
     case MSG_TYPES.CAPTURE_TAB:
       return await captureTab(sender);
 
+    case "chat_message":
+      return await handleChatMessage(message);
+
     default:
       return { type: MSG_TYPES.ERROR, error: "Unknown message type" };
   }
@@ -190,5 +193,30 @@ async function captureTab(sender) {
     return { type: "tab_captured", dataUrl };
   } catch (err) {
     return { type: MSG_TYPES.ERROR, error: "Tab capture failed: " + err.message };
+  }
+}
+
+async function handleChatMessage(message) {
+  const { userMessage, conversationHistory } = message;
+  const settings = await storage.getSettings();
+  const provider = settings.provider;
+  const apiKey = await storage.getApiKey(provider);
+  const model = await storage.getModel(provider) || DEFAULT_MODELS[provider] || "";
+  const temperature = await storage.getTemperature(provider);
+  const customEndpoint = await storage.getCustomEndpoint();
+
+  const contextPrompt = (conversationHistory || [])
+    .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+    .join("\n") + "\nUser: " + userMessage;
+
+  const config = { apiKey, model, temperature, customEndpoint };
+
+  try {
+    const rawResponse = await callAI(provider, config, contextPrompt);
+    const tokenEstimate = estimateTokens(contextPrompt) + estimateTokens(rawResponse);
+    await storage.addTokens(tokenEstimate);
+    return { type: "chat_response", response: rawResponse };
+  } catch (err) {
+    return { type: MSG_TYPES.ERROR, error: err.message || "Chat request failed" };
   }
 }
