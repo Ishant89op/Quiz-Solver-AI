@@ -102,7 +102,22 @@ export const MODELS = {
     { id: "microsoft/phi-4:free", label: "Phi-4 (Free)", vision: false },
     { id: "nousresearch/hermes-3-llama-3.1-405b:free", label: "Hermes 3 405B (Free)", vision: false }
   ],
-  [PROVIDERS.OLLAMA]: [],
+  [PROVIDERS.OLLAMA]: [
+    { id: "llama3", label: "Llama 3 (8B)", vision: false },
+    { id: "llama3.1", label: "Llama 3.1 (8B)", vision: false },
+    { id: "llama3.2", label: "Llama 3.2 (3B)", vision: false },
+    { id: "llama3.2-vision", label: "Llama 3.2 Vision (11B)", vision: true },
+    { id: "llama3.3", label: "Llama 3.3 (70B)", vision: false },
+    { id: "mistral", label: "Mistral (7B)", vision: false },
+    { id: "mixtral", label: "Mixtral 8x7B", vision: false },
+    { id: "gemma2", label: "Gemma 2 (9B)", vision: false },
+    { id: "gemma3", label: "Gemma 3 (4B)", vision: false },
+    { id: "qwen2.5", label: "Qwen 2.5 (7B)", vision: false },
+    { id: "phi3", label: "Phi-3 (3.8B)", vision: false },
+    { id: "deepseek-r1", label: "DeepSeek R1 (7B)", vision: false },
+    { id: "codellama", label: "Code Llama (7B)", vision: false },
+    { id: "llava", label: "LLaVA (7B)", vision: true }
+  ],
   [PROVIDERS.CUSTOM]: []
 };
 
@@ -114,7 +129,7 @@ export const DEFAULT_MODELS = {
   [PROVIDERS.MISTRAL]: "mistral-small-latest",
   [PROVIDERS.GROQ]: "llama-3.3-70b-versatile",
   [PROVIDERS.OPENROUTER]: "meta-llama/llama-3.1-8b-instruct:free",
-  [PROVIDERS.OLLAMA]: "",
+  [PROVIDERS.OLLAMA]: "llama3",
   [PROVIDERS.CUSTOM]: ""
 };
 
