@@ -1,4 +1,5 @@
 import { STORAGE_PREFIX, DEFAULT_SETTINGS } from "./constants.js";
+import { getKey, hasKey } from "./keys.js";
 
 function prefixKey(key) {
   return `${STORAGE_PREFIX}${key}`;
@@ -41,13 +42,8 @@ export async function saveSettings(settingsObj) {
 }
 
 export async function getApiKey(provider) {
-  try {
-    const { getKey, hasKey } = await import("./keys.js");
-    if (hasKey(provider)) {
-      return getKey(provider);
-    }
-  } catch {
-    // vault module unavailable, skip
+  if (hasKey(provider)) {
+    return getKey(provider);
   }
   return await get(`apikey_${provider}`);
 }

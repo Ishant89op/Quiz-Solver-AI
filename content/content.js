@@ -722,14 +722,18 @@
         position: "fixed",
         bottom: "20px",
         right: "20px",
+        top: "auto",
+        left: "auto",
         width: "10px",
         height: "10px",
         borderRadius: "50%",
         backgroundColor: getConfidenceColor(data.confidence),
-        cursor: "pointer",
+        cursor: "grab",
         zIndex: "2147483646",
-        transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
-        boxShadow: "0 2px 8px rgba(0,0,0,0.3)"
+        transition: "background-color 0.3s, box-shadow 0.3s, transform 0.15s",
+        boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+        userSelect: "none",
+        touchAction: "none"
       });
 
       card = document.createElement("div");
@@ -738,6 +742,8 @@
         position: "fixed",
         bottom: "40px",
         right: "16px",
+        top: "auto",
+        left: "auto",
         width: "280px",
         maxHeight: "320px",
         overflowY: "auto",
@@ -756,13 +762,89 @@
         display: "none",
         opacity: "0",
         transform: "translateY(8px) scale(0.95)",
-        transition: "all 0.25s cubic-bezier(0.4, 0, 0.2, 1)"
+        transition: "opacity 0.25s, transform 0.25s"
       });
 
       let pinned = false;
+      let isDragging = false;
+      let dragStartX = 0;
+      let dragStartY = 0;
+      let dotStartX = 0;
+      let dotStartY = 0;
+      let hasMoved = false;
+
+      function getDotRect() {
+        return dot.getBoundingClientRect();
+      }
+
+      function positionCard() {
+        const r = getDotRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+
+        card.style.bottom = "auto";
+        card.style.right = "auto";
+        card.style.top = "auto";
+        card.style.left = "auto";
+
+        if (r.top > vh / 2) {
+          card.style.bottom = (vh - r.top + 8) + "px";
+        } else {
+          card.style.top = (r.bottom + 8) + "px";
+        }
+
+        if (r.left > vw / 2) {
+          card.style.right = (vw - r.right) + "px";
+        } else {
+          card.style.left = r.left + "px";
+        }
+      }
+
+      dot.addEventListener("mousedown", (e) => {
+        isDragging = true;
+        hasMoved = false;
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        const r = getDotRect();
+        dotStartX = r.left;
+        dotStartY = r.top;
+        dot.style.cursor = "grabbing";
+        dot.style.transition = "background-color 0.3s, box-shadow 0.3s";
+        e.preventDefault();
+      });
+
+      document.addEventListener("mousemove", (e) => {
+        if (!isDragging) return;
+        const dx = e.clientX - dragStartX;
+        const dy = e.clientY - dragStartY;
+        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) hasMoved = true;
+        if (!hasMoved) return;
+
+        const newX = Math.max(0, Math.min(window.innerWidth - 12, dotStartX + dx));
+        const newY = Math.max(0, Math.min(window.innerHeight - 12, dotStartY + dy));
+
+        dot.style.bottom = "auto";
+        dot.style.right = "auto";
+        dot.style.left = newX + "px";
+        dot.style.top = newY + "px";
+      });
+
+      document.addEventListener("mouseup", () => {
+        if (!isDragging) return;
+        isDragging = false;
+        dot.style.cursor = "grab";
+        dot.style.transition = "background-color 0.3s, box-shadow 0.3s, transform 0.15s";
+
+        if (hasMoved) {
+          positionCard();
+        }
+      });
 
       dot.addEventListener("mouseenter", () => {
-        if (!pinned) showCard();
+        if (!pinned && !isDragging) {
+          positionCard();
+          showCard();
+        }
       });
 
       dot.addEventListener("mouseleave", () => {
@@ -777,9 +859,11 @@
         if (!pinned) hideCard();
       });
 
-      dot.addEventListener("click", () => {
+      dot.addEventListener("click", (e) => {
+        if (hasMoved) return;
         pinned = !pinned;
         if (pinned) {
+          positionCard();
           showCard();
           dot.style.boxShadow = `0 0 0 3px ${accent}, 0 2px 8px rgba(0,0,0,0.3)`;
         } else {
@@ -789,11 +873,12 @@
 
       dot.setAttribute("tabindex", "0");
       dot.setAttribute("role", "button");
-      dot.setAttribute("aria-label", "Quiz answer indicator");
+      dot.setAttribute("aria-label", "Quiz answer indicator - drag to move");
 
       dot.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
+          hasMoved = false;
           dot.click();
         }
       });
