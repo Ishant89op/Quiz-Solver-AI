@@ -3,7 +3,6 @@ import { initDisplaySection } from "./sections/display.js";
 import { initScreenshotSection } from "./sections/screenshot.js";
 import { initDetectionSection } from "./sections/detection.js";
 import { initTriggerSection } from "./sections/trigger.js";
-import { initHistorySection } from "./sections/history.js";
 import { initPrivacySection } from "./sections/privacy.js";
 import { initAppearanceSection } from "./sections/appearance.js";
 
@@ -13,7 +12,7 @@ const DEFAULT_SETTINGS = {
   displayMode: "floatingDot",
   screenshotMode: "autoCapture",
   enabled: true,
-  autoSolve: false,
+  autoFillEnabled: false,
   autoTrigger: true,
   triggerAfterInteraction: false,
   showExplanation: true,
@@ -28,6 +27,7 @@ const DEFAULT_SETTINGS = {
   theme: "dark",
   accentColor: "#6366f1",
   overlayOpacity: 0.92,
+  hideSidebarHandle: false,
   stripUrl: false,
   anonymiseOptions: false,
   temperature: 0.3,
@@ -63,7 +63,6 @@ async function bootstrapPopup() {
   await initSection("section-screenshot", settings, initScreenshotSection, "Capture settings");
   await initSection("section-detection", settings, initDetectionSection, "Detection settings");
   await initSection("section-trigger", settings, initTriggerSection, "Trigger settings");
-  await initSection("section-history", settings, initHistorySection, "History settings");
   await initSection("section-privacy", settings, initPrivacySection, "Privacy settings");
   await initSection("section-appearance", settings, initAppearanceSection, "Theme settings");
 
@@ -155,9 +154,35 @@ async function initAuthPanel() {
 }
 
 async function updateTokenCounter() {
-  const stored = await chrome.storage.local.get(`${STORAGE_PREFIX}session_tokens`);
-  const tokens = stored[`${STORAGE_PREFIX}session_tokens`] || 0;
-  document.getElementById("qsa-token-counter").textContent = `Tokens: ~${tokens.toLocaleString()}`;
+  const counter = document.getElementById("qsa-token-counter");
+  if (!counter) return;
+
+  try {
+    const response = await sendRuntimeMessage(
+      { type: "firebase_get_daily_usage" },
+      { timeoutMs: 5000, timeoutMessage: "Failed to load daily usage." }
+    );
+
+    if (response?.usage) {
+      const usage = response.usage;
+      const used = Number(usage.tokens || 0).toLocaleString();
+      counter.textContent = usage.unlimited
+        ? `Today: ~${used} / Unlimited`
+        : `Today: ~${used} / ${Number(usage.limit || 100000).toLocaleString()}`;
+      return;
+    }
+
+    if (response?.error) {
+      throw new Error(response.error);
+    }
+
+    counter.textContent = "Today: unavailable";
+  } catch (err) {
+    const message = String(err?.message || "").toLowerCase();
+    counter.textContent = /not logged in|sign in/.test(message)
+      ? "Today: sign in required"
+      : "Today: unavailable";
+  }
 }
 
 async function loadSettings() {
@@ -235,7 +260,7 @@ function renderAuthPanel({ status, user = null, error = "" }) {
         <div style="font-weight:600;font-size:12px;color:var(--text-primary);">${escapeHtml(title)}</div>
         <div style="font-size:11px;color:var(--text-secondary);line-height:1.5;margin-top:3px;">${escapeHtml(description)}</div>
       </div>
-      <div id="qsa-auth-panel-action"></div>
+      <div id="qsa-auth-panel-action" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;"></div>
     </div>
     <div id="qsa-auth-panel-status" style="min-height:16px;font-size:11px;color:${error ? "#fca5a5" : "var(--text-muted)"};">${escapeHtml(error || "")}</div>
   `;
@@ -243,8 +268,20 @@ function renderAuthPanel({ status, user = null, error = "" }) {
   const action = document.getElementById("qsa-auth-panel-action");
   if (!action) return;
 
+  const openSidebarBtn = document.createElement("button");
+  openSidebarBtn.className = "qsa-btn qsa-btn-sm qsa-btn-outline";
+  openSidebarBtn.style.whiteSpace = "nowrap";
+  openSidebarBtn.textContent = "Open Sidebar";
+  openSidebarBtn.addEventListener("click", async () => {
+    await openSidebarOnCurrentTab();
+  });
+
   if (status === "checking") {
-    action.innerHTML = `<div style="font-size:11px;color:var(--text-muted);white-space:nowrap;">Please wait…</div>`;
+    const wait = document.createElement("div");
+    wait.style.cssText = "font-size:11px;color:var(--text-muted);white-space:nowrap;";
+    wait.textContent = "Please wait…";
+    action.appendChild(wait);
+    action.appendChild(openSidebarBtn);
     return;
   }
 
@@ -262,6 +299,7 @@ function renderAuthPanel({ status, user = null, error = "" }) {
       try {
         await sendRuntimeMessage({ type: "firebase_logout" }, { timeoutMs: 4000, timeoutMessage: "Sign-out timed out. Please try again." });
         renderAuthPanel({ status: "signed_out" });
+        updateTokenCounter().catch(() => {});
       } catch (err) {
         button.disabled = false;
         if (statusEl) statusEl.textContent = err?.message || "Failed to sign out.";
@@ -283,6 +321,7 @@ function renderAuthPanel({ status, user = null, error = "" }) {
 
         if (response?.user) {
           renderAuthPanel({ status: "signed_in", user: response.user });
+          updateTokenCounter().catch(() => {});
           return;
         }
 
@@ -295,11 +334,13 @@ function renderAuthPanel({ status, user = null, error = "" }) {
           status: "signed_out",
           error: err?.message || "Sign-in failed."
         });
+        updateTokenCounter().catch(() => {});
       }
     });
   }
 
   action.appendChild(button);
+  action.appendChild(openSidebarBtn);
 }
 
 function setSettingsVisibility(isSignedIn) {
@@ -346,6 +387,46 @@ function renderPopupNotice(message, tone = "warning") {
     "color: var(--text-primary)"
   ].join(";");
   notice.textContent = message;
+}
+
+async function openSidebarOnCurrentTab() {
+  const popup = document.getElementById("qsa-popup");
+  if (popup?.dataset.extensionEnabled === "false") {
+    renderPopupNotice("Extension is off. Turn it on before opening the sidebar.", "warning");
+    return;
+  }
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) {
+      throw new Error("No active tab");
+    }
+
+    const response = await new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(tab.id, { type: "open_sidebar" }, (result) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(result);
+      });
+    });
+
+    if (response?.disabled) {
+      renderPopupNotice("Extension is off on this page. Turn it on and reload the tab.", "warning");
+      return;
+    }
+
+    if (response?.ok) {
+      renderPopupNotice("");
+      return;
+    }
+
+    renderPopupNotice("Could not open the sidebar on this tab. Reload the page and try again.", "warning");
+  } catch (err) {
+    console.warn("[Quiz Solver AI] Failed to open sidebar:", err);
+    renderPopupNotice("Could not open the sidebar on this tab. Reload the page and try again.", "warning");
+  }
 }
 
 function sendRuntimeMessage(message, options = {}) {

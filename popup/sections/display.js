@@ -1,7 +1,7 @@
 import { saveSetting } from "../popup.js";
 
 const DISPLAY_MODES = [
-  { id: "floatingDot", label: "Floating Dot", desc: "Places a hoverable dot beside each question and keeps the floating answer dot available" },
+  { id: "floatingDot", label: "Floating Dot", desc: "Places a subtle clickable dot beside each detected question. Hover shows the last fetched answer." },
   { id: "urlHash", label: "URL Hash", desc: "Writes the answer directly into the page URL hash with no visual overlay" }
 ];
 
@@ -26,13 +26,19 @@ export function initDisplaySection(settings) {
   html += `<div class="qsa-divider"></div>`;
 
   html += `<div class="qsa-group">`;
-  html += `<div class="qsa-group-title">Auto Solve</div>`;
+  html += `<div class="qsa-group-title">Answer Actions</div>`;
 
   html += `<div class="qsa-toggle-row">`;
-  html += `<span class="qsa-toggle-label">Enable Auto-Solve (Auto-fill only)</span>`;
-  html += `<label class="qsa-toggle"><input type="checkbox" id="qsa-auto-solve" ${settings.autoSolve ? "checked" : ""}><span class="qsa-toggle-track"></span></label>`;
+  html += `<span class="qsa-toggle-label">Auto-fill answer into page</span>`;
+  html += `<label class="qsa-toggle"><input type="checkbox" id="qsa-auto-fill" ${settings.autoFillEnabled ? "checked" : ""}><span class="qsa-toggle-track"></span></label>`;
   html += `</div>`;
-  html += `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Automatically detects questions and auto-fills them without showing a separate answer display. The sidebar keeps the conversation history.</div>`;
+  html += `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">After a user-triggered solve returns, the extension fills supported radios, checkboxes, text inputs, and selects using realistic page events.</div>`;
+
+  html += `<div class="qsa-toggle-row" style="margin-top:10px;">`;
+  html += `<span class="qsa-toggle-label">Hide sidebar handle</span>`;
+  html += `<label class="qsa-toggle"><input type="checkbox" id="qsa-hide-sidebar-handle" ${settings.hideSidebarHandle ? "checked" : ""}><span class="qsa-toggle-track"></span></label>`;
+  html += `</div>`;
+  html += `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Hides the edge arrow button. You can still reopen the sidebar from the popup or when a solve starts.</div>`;
 
   html += `</div>`;
 
@@ -72,8 +78,12 @@ export function initDisplaySection(settings) {
     radio.addEventListener("change", () => saveSetting("displayMode", radio.value));
   });
 
-  document.getElementById("qsa-auto-solve").addEventListener("change", (e) => {
-    saveSetting("autoSolve", e.target.checked);
+  document.getElementById("qsa-auto-fill").addEventListener("change", (e) => {
+    saveSetting("autoFillEnabled", e.target.checked);
+  });
+
+  document.getElementById("qsa-hide-sidebar-handle").addEventListener("change", (e) => {
+    saveSetting("hideSidebarHandle", e.target.checked);
   });
 
   document.getElementById("qsa-show-explanation").addEventListener("change", (e) => {

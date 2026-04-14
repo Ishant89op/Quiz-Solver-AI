@@ -192,6 +192,7 @@ export const MSG_TYPES = {
   ERROR: "error",
   FETCH_OLLAMA_MODELS: "fetch_ollama_models",
   CAPTURE_TAB: "capture_tab",
+  OPEN_SIDEBAR: "open_sidebar",
   UPDATE_SETTINGS: "update_settings",
   GET_HISTORY: "get_history",
   CLEAR_HISTORY: "clear_history",
@@ -203,7 +204,7 @@ export const DEFAULT_SETTINGS = {
   displayMode: DISPLAY_MODES.FLOATING_DOT,
   screenshotMode: SCREENSHOT_MODES.AUTO_CAPTURE,
   enabled: true,
-  autoSolve: false,
+  autoFillEnabled: false,
   autoTrigger: true,
   triggerAfterInteraction: false,
   showExplanation: true,
@@ -218,12 +219,16 @@ export const DEFAULT_SETTINGS = {
   theme: THEMES.DARK,
   accentColor: "#6366f1",
   overlayOpacity: 0.92,
+  hideSidebarHandle: false,
   stripUrl: false,
   anonymiseOptions: false,
   temperature: 0.3,
   activationHotkey: "Alt+Shift+A",
   regionSelectHotkey: "Alt+Shift+S"
 };
+
+export const DAILY_TOKEN_LIMIT = 100000;
+export const ADMIN_EMAILS = ["temp1.snatcha34@gmail.com"];
 
 export const VISION_PROVIDERS = [
   PROVIDERS.CLAUDE,

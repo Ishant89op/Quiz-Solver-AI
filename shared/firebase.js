@@ -216,13 +216,25 @@ export async function getChats(uid, idToken) {
   const data = await response.json();
   if (!data.documents) return [];
 
-  return data.documents.map(doc => ({
-    id: doc.name.split("/").pop(),
-    title: doc.fields?.title?.stringValue || "Untitled",
-    createdAt: doc.fields?.createdAt?.timestampValue || "",
-    updatedAt: doc.fields?.updatedAt?.timestampValue || "",
-    messages: parseFirestoreArray(doc.fields?.messages?.arrayValue?.values || [])
+  const chats = await Promise.all(data.documents.map(async (doc) => {
+    const chatId = doc.name.split("/").pop();
+    const messageDocs = await getChatMessages(uid, idToken, chatId);
+    const legacyMessages = parseLegacyFirestoreMessages(doc.fields?.messages?.arrayValue?.values || []);
+    const messages = messageDocs.length > 0 ? messageDocs : legacyMessages;
+
+    return {
+      id: chatId,
+      title: doc.fields?.title?.stringValue || "Untitled",
+      createdAt: doc.fields?.createdAt?.timestampValue || "",
+      updatedAt: doc.fields?.updatedAt?.timestampValue || "",
+      messageCount: parseInt(doc.fields?.messageCount?.integerValue || `${messages.length}`, 10) || messages.length,
+      lastMessagePreview: doc.fields?.lastMessagePreview?.stringValue || "",
+      legacyEmbeddedMessages: legacyMessages.length > 0,
+      messages
+    };
   }));
+
+  return chats;
 }
 
 export async function createChat(uid, idToken, title) {
@@ -239,7 +251,8 @@ export async function createChat(uid, idToken, title) {
         title: { stringValue: title || "New Chat" },
         createdAt: { timestampValue: now },
         updatedAt: { timestampValue: now },
-        messages: { arrayValue: { values: [] } }
+        messageCount: { integerValue: "0" },
+        lastMessagePreview: { stringValue: "" }
       }
     })
   });
@@ -252,43 +265,46 @@ export async function createChat(uid, idToken, title) {
     title: title || "New Chat",
     createdAt: now,
     updatedAt: now,
+    messageCount: 0,
+    lastMessagePreview: "",
     messages: []
   };
 }
 
 export async function addMessageToChat(uid, idToken, chatId, messages) {
   const now = new Date().toISOString();
-  const url = `${FIRESTORE_BASE}/users/${uid}/chats/${chatId}?updateMask.fieldPaths=messages&updateMask.fieldPaths=updatedAt`;
+  const currentChatDoc = await getChatDocument(uid, idToken, chatId);
+  const hadLegacyEmbeddedMessages = !!currentChatDoc?.fields?.messages;
+  const normalizedMessages = (messages || [])
+    .filter(message => !message?.loading)
+    .map((message, index) => normalizeStoredMessage(message, index));
 
-  const firestoreMessages = messages.map(m => ({
-    mapValue: {
-      fields: {
-        role: { stringValue: m.role },
-        content: { stringValue: m.content },
-        timestamp: { stringValue: m.timestamp || now }
-      }
-    }
-  }));
+  const existingMessageDocs = await listChatMessages(uid, idToken, chatId);
+  const existingIds = new Set(existingMessageDocs.map(doc => doc.id));
+  const nextIds = new Set(normalizedMessages.map(message => message.id));
 
-  const response = await fetch(url, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      fields: {
-        updatedAt: { timestampValue: now },
-        messages: { arrayValue: { values: firestoreMessages } }
-      }
-    })
+  await Promise.all(normalizedMessages.map(message =>
+    upsertChatMessage(uid, idToken, chatId, message)
+  ));
+
+  await Promise.all(existingMessageDocs
+    .filter(doc => !nextIds.has(doc.id))
+    .map(doc => deleteChatMessage(uid, idToken, chatId, doc.id)));
+
+  await patchChatMetadata(uid, idToken, chatId, {
+    title: currentChatDoc?.fields?.title?.stringValue || "New Chat",
+    createdAt: currentChatDoc?.fields?.createdAt?.timestampValue || now,
+    updatedAt: now,
+    messageCount: normalizedMessages.length,
+    lastMessagePreview: buildLastMessagePreview(normalizedMessages),
+    clearLegacyMessages: hadLegacyEmbeddedMessages
   });
-  if (!response.ok) {
-    throw await createFirestoreRequestError("save chat messages", response);
-  }
 }
 
 export async function deleteChat(uid, idToken, chatId) {
+  const existingMessageDocs = await listChatMessages(uid, idToken, chatId);
+  await Promise.all(existingMessageDocs.map(doc => deleteChatMessage(uid, idToken, chatId, doc.id)));
+
   const url = `${FIRESTORE_BASE}/users/${uid}/chats/${chatId}`;
   const response = await fetch(url, {
     method: "DELETE",
@@ -299,15 +315,275 @@ export async function deleteChat(uid, idToken, chatId) {
   }
 }
 
-function parseFirestoreArray(values) {
-  return (values || []).map(v => {
+export async function getDailyUsageSummary(uid, idToken, email = "") {
+  const dayKey = getUsageDayKey();
+  const url = `${FIRESTORE_BASE}/users/${uid}/usage/${dayKey}`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${idToken}` }
+  });
+
+  if (response.status === 404) {
+    return {
+      date: dayKey,
+      tokens: 0,
+      updatedAt: "",
+      email
+    };
+  }
+
+  if (!response.ok) {
+    throw await createFirestoreRequestError("load daily token usage", response);
+  }
+
+  const doc = await response.json();
+  return parseUsageDocument(doc, email);
+}
+
+export async function incrementDailyUsage(uid, idToken, email, tokenCount) {
+  const summary = await getDailyUsageSummary(uid, idToken, email);
+  const nextTokens = (summary.tokens || 0) + Math.max(0, tokenCount || 0);
+  const now = new Date().toISOString();
+  const url = `${FIRESTORE_BASE}/users/${uid}/usage/${summary.date}`;
+
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      fields: {
+        date: { stringValue: summary.date },
+        email: { stringValue: email || summary.email || "" },
+        tokens: { integerValue: `${nextTokens}` },
+        updatedAt: { timestampValue: now }
+      }
+    })
+  });
+
+  if (!response.ok) {
+    throw await createFirestoreRequestError("save daily token usage", response);
+  }
+
+  return {
+    date: summary.date,
+    email: email || summary.email || "",
+    tokens: nextTokens,
+    updatedAt: now
+  };
+}
+
+async function getChatMessages(uid, idToken, chatId) {
+  const docs = await listChatMessages(uid, idToken, chatId);
+  return docs.map(doc => parseChatMessageDocument(doc));
+}
+
+async function listChatMessages(uid, idToken, chatId) {
+  const url = `${FIRESTORE_BASE}/users/${uid}/chats/${chatId}/messages?orderBy=timestamp&pageSize=500`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${idToken}` }
+  });
+
+  if (response.status === 404) {
+    return [];
+  }
+
+  if (!response.ok) {
+    throw await createFirestoreRequestError("load chat messages", response);
+  }
+
+  const data = await response.json();
+  return data.documents || [];
+}
+
+async function getChatDocument(uid, idToken, chatId) {
+  const url = `${FIRESTORE_BASE}/users/${uid}/chats/${chatId}`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${idToken}` }
+  });
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw await createFirestoreRequestError("load chat", response);
+  }
+
+  return await response.json();
+}
+
+async function upsertChatMessage(uid, idToken, chatId, message) {
+  const url = `${FIRESTORE_BASE}/users/${uid}/chats/${chatId}/messages/${message.id}`;
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      fields: buildFirestoreMessageFields(message)
+    })
+  });
+
+  if (!response.ok) {
+    throw await createFirestoreRequestError("save chat message", response);
+  }
+}
+
+async function deleteChatMessage(uid, idToken, chatId, messageId) {
+  const url = `${FIRESTORE_BASE}/users/${uid}/chats/${chatId}/messages/${messageId}`;
+  const response = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${idToken}` }
+  });
+
+  if (response.status === 404) {
+    return;
+  }
+
+  if (!response.ok) {
+    throw await createFirestoreRequestError("delete chat message", response);
+  }
+}
+
+async function patchChatMetadata(uid, idToken, chatId, metadata) {
+  const fieldPaths = ["title", "createdAt", "updatedAt", "messageCount", "lastMessagePreview"];
+  const url = new URL(`${FIRESTORE_BASE}/users/${uid}/chats/${chatId}`);
+  fieldPaths.forEach(fieldPath => url.searchParams.append("updateMask.fieldPaths", fieldPath));
+
+  const fields = {
+    title: { stringValue: metadata.title || "New Chat" },
+    createdAt: { timestampValue: metadata.createdAt || new Date().toISOString() },
+    updatedAt: { timestampValue: metadata.updatedAt || new Date().toISOString() },
+    messageCount: { integerValue: `${metadata.messageCount || 0}` },
+    lastMessagePreview: { stringValue: metadata.lastMessagePreview || "" }
+  };
+
+  if (metadata.clearLegacyMessages) {
+    url.searchParams.append("updateMask.fieldPaths", "messages");
+    fields.messages = { arrayValue: { values: [] } };
+  }
+
+  const response = await fetch(url.toString(), {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ fields })
+  });
+
+  if (!response.ok) {
+    throw await createFirestoreRequestError("update chat metadata", response);
+  }
+}
+
+function normalizeStoredMessage(message, index = 0) {
+  return {
+    id: message?.id || buildFallbackMessageId(message, index),
+    role: message?.role || "assistant",
+    content: String(message?.content || ""),
+    timestamp: message?.timestamp || new Date().toISOString(),
+    messageType: message?.messageType || (message?.imageDataUrl ? "image" : "text"),
+    imageDataUrl: message?.imageDataUrl || "",
+    questionType: message?.questionType || "",
+    confidence: message?.confidence || "",
+    questionHash: message?.questionHash || ""
+  };
+}
+
+function buildFirestoreMessageFields(message) {
+  const fields = {
+    id: { stringValue: message.id || buildFallbackMessageId(message) },
+    role: { stringValue: message.role },
+    content: { stringValue: message.content || "" },
+    timestamp: { stringValue: message.timestamp || new Date().toISOString() },
+    messageType: { stringValue: message.messageType || "text" }
+  };
+
+  if (message.imageDataUrl) {
+    fields.imageDataUrl = { stringValue: message.imageDataUrl };
+  }
+  if (message.questionType) {
+    fields.questionType = { stringValue: message.questionType };
+  }
+  if (message.confidence) {
+    fields.confidence = { stringValue: message.confidence };
+  }
+  if (message.questionHash) {
+    fields.questionHash = { stringValue: message.questionHash };
+  }
+
+  return fields;
+}
+
+function parseLegacyFirestoreMessages(values) {
+  return (values || []).map((v, index) => {
     const fields = v.mapValue?.fields || {};
     return {
+      id: fields.id?.stringValue || buildFallbackMessageId({
+        role: fields.role?.stringValue || "user",
+        content: fields.content?.stringValue || "",
+        timestamp: fields.timestamp?.stringValue || ""
+      }, index),
       role: fields.role?.stringValue || "user",
       content: fields.content?.stringValue || "",
-      timestamp: fields.timestamp?.stringValue || ""
+      timestamp: fields.timestamp?.stringValue || "",
+      messageType: fields.messageType?.stringValue || (fields.imageDataUrl?.stringValue ? "image" : "text"),
+      imageDataUrl: fields.imageDataUrl?.stringValue || "",
+      questionType: fields.questionType?.stringValue || "",
+      confidence: fields.confidence?.stringValue || "",
+      questionHash: fields.questionHash?.stringValue || ""
     };
   });
+}
+
+function parseChatMessageDocument(doc) {
+  const fields = doc.fields || {};
+  return {
+    id: fields.id?.stringValue || doc.name.split("/").pop(),
+    role: fields.role?.stringValue || "user",
+    content: fields.content?.stringValue || "",
+    timestamp: fields.timestamp?.stringValue || "",
+    messageType: fields.messageType?.stringValue || (fields.imageDataUrl?.stringValue ? "image" : "text"),
+    imageDataUrl: fields.imageDataUrl?.stringValue || "",
+    questionType: fields.questionType?.stringValue || "",
+    confidence: fields.confidence?.stringValue || "",
+    questionHash: fields.questionHash?.stringValue || ""
+  };
+}
+
+function parseUsageDocument(doc, email = "") {
+  const fields = doc?.fields || {};
+  return {
+    date: fields.date?.stringValue || getUsageDayKey(),
+    email: fields.email?.stringValue || email || "",
+    tokens: parseInt(fields.tokens?.integerValue || "0", 10) || 0,
+    updatedAt: fields.updatedAt?.timestampValue || ""
+  };
+}
+
+function buildFallbackMessageId(message, index = 0) {
+  const base = `${message?.timestamp || "now"}_${message?.role || "msg"}_${index}`;
+  return base.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function buildLastMessagePreview(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return "";
+  }
+
+  const lastMessage = messages[messages.length - 1];
+  if (lastMessage.imageDataUrl && !lastMessage.content) {
+    return "[image]";
+  }
+
+  return String(lastMessage.content || "").slice(0, 120);
+}
+
+function getUsageDayKey() {
+  return new Date().toISOString().slice(0, 10);
 }
 
 function createOAuthState() {

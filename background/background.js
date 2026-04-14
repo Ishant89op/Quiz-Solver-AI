@@ -1,10 +1,8 @@
 import { callAI } from "./ai/index.js";
-import { MSG_TYPES, PROVIDERS, DEFAULT_MODELS, VISION_PROVIDERS, CHAT_SYSTEM_PROMPT } from "../shared/constants.js";
+import { MSG_TYPES, PROVIDERS, DEFAULT_MODELS, VISION_PROVIDERS, CHAT_SYSTEM_PROMPT, DAILY_TOKEN_LIMIT, ADMIN_EMAILS } from "../shared/constants.js";
 import * as storage from "../shared/storage.js";
 import { parseJSON, estimateTokens } from "../shared/utils.js";
 import * as firebase from "../shared/firebase.js";
-
-const sessionHistory = [];
 
 chrome.runtime.onInstalled.addListener(async () => {
   const settings = await storage.getSettings();
@@ -84,6 +82,24 @@ async function handleMessage(message, sender) {
         return { type: MSG_TYPES.ERROR, error: err.message || "Failed to check sign-in status" };
       }
 
+    case "firebase_get_daily_usage":
+      try {
+        const usageUser = await firebase.getCurrentUser();
+        if (!usageUser) {
+          return { type: MSG_TYPES.ERROR, error: "Not logged in" };
+        }
+        const usage = await firebase.getDailyUsageSummary(usageUser.uid, usageUser.idToken, usageUser.email || "");
+        const summary = buildUsageSummary(usageUser, usage);
+        await setDailyUsageCache(summary);
+        return { type: "firebase_daily_usage", usage: summary };
+      } catch (err) {
+        const cached = await getDailyUsageCache();
+        if (cached) {
+          return { type: "firebase_daily_usage", usage: cached, cached: true };
+        }
+        return { type: MSG_TYPES.ERROR, error: err.message || "Failed to load daily usage" };
+      }
+
     // Firebase Chat CRUD
     case "firebase_get_chats":
       try {
@@ -147,6 +163,8 @@ async function solveQuestion(message, sender) {
     return { type: MSG_TYPES.ANSWER_RESULT, ...cached, fromCache: true };
   }
 
+  await enforceDailyTokenLimit(currentUser);
+
   const provider = settings.provider;
   const apiKey = await storage.getApiKey(provider);
   const model = await storage.getModel(provider) || DEFAULT_MODELS[provider] || "";
@@ -179,20 +197,9 @@ async function solveQuestion(message, sender) {
 
     const tokenEstimate = estimateTokens(prompt) + estimateTokens(rawResponse);
     await storage.addTokens(tokenEstimate);
+    await incrementDailyUsage(currentUser, tokenEstimate);
 
     await storage.setCachedAnswer(questionHash, result);
-    await storage.addHistoryEntry({
-      question: question.slice(0, 300),
-      options: options || [],
-      questionType,
-      answer: result.answer,
-      explanation: result.explanation,
-      full: result.full,
-      confidence: result.confidence,
-      userAnswer: userAnswer || null,
-      provider: providerUsed,
-      model: modelUsed
-    });
 
     return {
       type: MSG_TYPES.ANSWER_RESULT,
@@ -347,9 +354,11 @@ async function handleChatMessage(message) {
   const config = { apiKey, model, temperature, customEndpoint, systemPrompt: CHAT_SYSTEM_PROMPT };
 
   try {
+    await enforceDailyTokenLimit(currentUser);
     const { rawResponse } = await requestChatResponse(provider, config, contextPrompt);
     const tokenEstimate = estimateTokens(contextPrompt) + estimateTokens(rawResponse);
     await storage.addTokens(tokenEstimate);
+    await incrementDailyUsage(currentUser, tokenEstimate);
     return { type: "chat_response", response: rawResponse };
   } catch (err) {
     return { type: MSG_TYPES.ERROR, error: err.message || "Chat request failed" };
@@ -423,4 +432,61 @@ function shouldRetryForAmbiguousAnswer(rawResponse, options) {
     text.includes("cannot determine") ||
     text.includes("can't determine")
   );
+}
+
+async function enforceDailyTokenLimit(user) {
+  if (isAdminUser(user?.email)) {
+    return;
+  }
+
+  const usage = await firebase.getDailyUsageSummary(user.uid, user.idToken, user.email || "");
+  const summary = buildUsageSummary(user, usage);
+  await setDailyUsageCache(summary);
+
+  if ((summary.tokens || 0) >= DAILY_TOKEN_LIMIT) {
+    throw new Error(`Daily token limit reached. You have used approximately ${summary.tokens.toLocaleString()} / ${DAILY_TOKEN_LIMIT.toLocaleString()} tokens today.`);
+  }
+}
+
+async function incrementDailyUsage(user, tokenEstimate) {
+  if (!user) {
+    return null;
+  }
+
+  const usage = await firebase.incrementDailyUsage(user.uid, user.idToken, user.email || "", tokenEstimate);
+  const summary = buildUsageSummary(user, usage);
+  await setDailyUsageCache(summary);
+  return summary;
+}
+
+function isAdminUser(email = "") {
+  return ADMIN_EMAILS.includes(String(email || "").toLowerCase());
+}
+
+function buildUsageSummary(user, usage = {}) {
+  return {
+    date: usage.date || getTodayKey(),
+    email: user?.email || usage.email || "",
+    tokens: usage.tokens || 0,
+    updatedAt: usage.updatedAt || "",
+    limit: isAdminUser(user?.email) ? null : DAILY_TOKEN_LIMIT,
+    unlimited: isAdminUser(user?.email)
+  };
+}
+
+function getTodayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function setDailyUsageCache(summary) {
+  await chrome.storage.local.set({ qsa_daily_usage_cache: summary });
+}
+
+async function getDailyUsageCache() {
+  const stored = await chrome.storage.local.get("qsa_daily_usage_cache");
+  const cached = stored.qsa_daily_usage_cache;
+  if (!cached || cached.date !== getTodayKey()) {
+    return null;
+  }
+  return cached;
 }

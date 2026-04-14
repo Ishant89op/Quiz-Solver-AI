@@ -5,7 +5,7 @@
     provider: "openai",
     displayMode: "floatingDot",
     screenshotMode: "autoCapture",
-    autoSolve: false,
+    autoFillEnabled: false,
     autoTrigger: true,
     triggerAfterInteraction: false,
     showExplanation: true,
@@ -17,6 +17,7 @@
     detectImages: true,
     debounceDelay: DEBOUNCE_DEFAULT,
     siteList: [],
+    hideSidebarHandle: false,
     activationHotkey: "Alt+Shift+A",
     regionSelectHotkey: "Alt+Shift+S"
   };
@@ -102,7 +103,7 @@
     console.log(LOG_PREFIX, LOG_STYLE, "Active on", currentHost,
       "| Provider:", settings.provider || "default",
       "| Display:", settings.displayMode || "floatingDot",
-      "| AutoSolve:", settings.autoSolve || false);
+      "| AutoFill:", settings.autoFillEnabled || false);
 
     await activateExtension();
   }
@@ -239,6 +240,14 @@
         }
         startRegionSelect();
         sendResponse({ ok: true });
+      } else if (msg.type === "open_sidebar") {
+        if (!isExtensionActive) {
+          sendResponse({ ok: false, disabled: true });
+          return true;
+        }
+        const sidebar = getOrCreateSidebar();
+        openSidebar(sidebar);
+        sendResponse({ ok: true });
       }
       return true;
     });
@@ -345,6 +354,10 @@
         clearDisplays();
       }
 
+      if ("qsa_hideSidebarHandle" in changes) {
+        applySidebarOpenState();
+      }
+
       if (shouldRescan) {
         scanPage(false, { openSidebarOnUnauth: false });
       }
@@ -418,22 +431,7 @@
             }
           }
         }
-        // Auto-solve mode: trigger all questions automatically
-        else if (settings.autoSolve) {
-          if (canAutoSolve && (!processedHashes.has(hash) || forceTrigger)) {
-            processedHashes.add(hash);
-            solveAndDisplay(q, hash);
-          }
-        }
-        // Single question → auto-trigger
-        else if (questions.length === 1) {
-          if (canAutoSolve && (!processedHashes.has(hash) || forceTrigger)) {
-            processedHashes.add(hash);
-            await solveAndDisplay(q, hash);
-          }
-        }
-        // Multiple questions: place dots
-        else {
+        else if (forceTrigger) {
           if (forceTrigger && canAutoSolve && (!processedHashes.has(hash) || forceTrigger)) {
             processedHashes.add(hash);
             await solveAndDisplay(q, hash);
@@ -471,6 +469,14 @@
 
     console.log(LOG_PREFIX, LOG_STYLE, "Sending to AI:", question.text.slice(0, 80));
 
+    const queuedSolve = queueSidebarSolveRequest({
+      question: question.text,
+      options: question.options || [],
+      questionType: question.type,
+      userAnswer: question.userAnswer || null,
+      questionHash: hash
+    });
+
     chrome.runtime.sendMessage({
       type: "solve_question",
       question: question.text,
@@ -481,7 +487,23 @@
       userAnswer: question.userAnswer || null
     }, (response) => {
       if (chrome.runtime.lastError) {
-        console.error(LOG_PREFIX, LOG_STYLE, "Message error:", chrome.runtime.lastError.message);
+        const runtimeError = chrome.runtime.lastError.message || "Request failed";
+        console.error(LOG_PREFIX, LOG_STYLE, "Message error:", runtimeError);
+        const errorData = {
+          answer: "Error: " + runtimeError,
+          full: "Error: " + runtimeError,
+          explanation: "",
+          confidence: "low",
+          question: question.text,
+          userAnswer: question.userAnswer,
+          questionElement: question.element,
+          questionType: question.type,
+          options: question.options,
+          questionHash: hash
+        };
+        completeSidebarSolveRequest(queuedSolve, errorData);
+        updateQuestionDotState(hash, errorData);
+        displayError(runtimeError);
         return;
       }
       if (!isExtensionActive) {
@@ -496,7 +518,8 @@
           userAnswer: question.userAnswer,
           questionElement: question.element,
           questionType: question.type,
-          options: question.options
+          options: question.options,
+          questionHash: hash
         };
 
         // Always try to auto-fill
@@ -505,7 +528,7 @@
           console.log(LOG_PREFIX, LOG_STYLE, "Auto-filled answer");
         }
 
-        addToSidebar(answerData);
+        completeSidebarSolveRequest(queuedSolve, answerData);
         displayAnswer(answerData, question.element);
 
         updateQuestionDotState(hash, answerData);
@@ -520,9 +543,10 @@
           userAnswer: question.userAnswer,
           questionElement: question.element,
           questionType: question.type,
-          options: question.options
+          options: question.options,
+          questionHash: hash
         };
-        addToSidebar(errorData);
+        completeSidebarSolveRequest(queuedSolve, errorData);
         updateQuestionDotState(hash, errorData);
         displayError(response.error);
       }
@@ -531,7 +555,7 @@
 
   // ─── Auto-Fill ─────────────────────────────────────────────────────
   function tryAutoFill(question, response) {
-    if (!question.element || !response.answer) return false;
+    if (!settings.autoFillEnabled || !question.element || !response.answer) return false;
 
     const answer = response.answer.trim();
 
@@ -569,6 +593,7 @@
       if (isLetterMatch || isTextMatch) {
         inputs[i].click();
         inputs[i].checked = true;
+        inputs[i].dispatchEvent(new Event("input", { bubbles: true }));
         inputs[i].dispatchEvent(new Event("change", { bubbles: true }));
         return true;
       }
@@ -580,6 +605,8 @@
       const text = cleanText(item);
       if (text && answerLower.includes(text.toLowerCase())) {
         item.click();
+        item.dispatchEvent(new Event("input", { bubbles: true }));
+        item.dispatchEvent(new Event("change", { bubbles: true }));
         return true;
       }
     }
@@ -623,6 +650,7 @@
       if (opt.textContent.toLowerCase().trim().includes(answerLower) ||
           answerLower.includes(opt.textContent.toLowerCase().trim())) {
         select.value = opt.value;
+        select.dispatchEvent(new Event("input", { bubbles: true }));
         select.dispatchEvent(new Event("change", { bubbles: true }));
         return true;
       }
@@ -709,13 +737,9 @@
         return;
       }
 
-      if (dotState?.answerData && getEffectiveDisplayMode() === "floatingDot") {
-        showQuestionDotCard(dotState.answerData, dot);
-        return;
-      }
-
       if (dotState) {
         dotState.isSolving = true;
+        dotState.dot.title = "Solving...";
       }
 
       await solveAndDisplay(question, hash);
@@ -844,11 +868,6 @@
   function displayAnswer(data, questionElement) {
     if (!isExtensionActive) return;
     const mode = getEffectiveDisplayMode();
-
-    if (settings.autoSolve) {
-      clearDisplays();
-      return;
-    }
 
     switch (mode) {
       case "floatingDot":
@@ -1103,24 +1122,31 @@
     chatError: ""
   };
 
-  function addToSidebar(data) {
-    if (!isExtensionActive) return;
-    const sidebar = getOrCreateSidebar();
-    if (!sidebar) return;
-    ensureActiveChat(sidebar);
+  function createSidebarMessage(message) {
+    return {
+      id: message?.id || createMessageId(message?.role || "msg"),
+      role: message?.role || "assistant",
+      content: String(message?.content || ""),
+      timestamp: message?.timestamp || new Date().toISOString(),
+      loading: !!message?.loading,
+      messageType: message?.messageType || (message?.imageDataUrl ? "image" : "text"),
+      imageDataUrl: message?.imageDataUrl || "",
+      questionType: message?.questionType || "",
+      confidence: message?.confidence || "",
+      questionHash: message?.questionHash || ""
+    };
+  }
 
-    // Add Q&A as messages
-    const questionMessage = formatSidebarQuestionMessage(data);
-    if (questionMessage) {
-      sidebarState.activeMessages.push({ role: "user", content: questionMessage, timestamp: new Date().toISOString() });
-    }
-
-    let aiMessage = data.full || data.rawResponse || data.answer || "";
-    if (data.confidence) aiMessage += `\n\n[Confidence: ${data.confidence}]`;
-    sidebarState.activeMessages.push({ role: "assistant", content: aiMessage, timestamp: new Date().toISOString() });
-
-    renderSidebarContent(sidebar);
-    autoSaveChat();
+  function normalizeSidebarMessages(messages = []) {
+    return messages.map((message, index) => {
+      if (message?.id) {
+        return createSidebarMessage(message);
+      }
+      return createSidebarMessage({
+        ...message,
+        id: buildFallbackSidebarMessageId(message, index)
+      });
+    });
   }
 
   function formatSidebarQuestionMessage(data) {
@@ -1141,7 +1167,124 @@
       parts.push(`Current answer-\n${data.userAnswer}`);
     }
 
+    if (data.questionType) {
+      parts.push(`Question type-\n${data.questionType}`);
+    }
+
     return parts.join("\n\n").trim();
+  }
+
+  function formatSidebarAssistantMessage(data) {
+    let aiMessage = data.full || data.rawResponse || data.answer || "";
+    if (data.confidence) {
+      aiMessage += `\n\n[Confidence: ${data.confidence}]`;
+    }
+    return aiMessage.trim();
+  }
+
+  function createMessageId(prefix = "msg") {
+    if (typeof crypto?.randomUUID === "function") {
+      return `${prefix}_${crypto.randomUUID()}`;
+    }
+    return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  function buildFallbackSidebarMessageId(message, index = 0) {
+    return `${message?.role || "msg"}_${message?.timestamp || Date.now()}_${index}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+  }
+
+  function getChatById(chatId) {
+    return sidebarState.chats.find(chat => chat.id === chatId || chat.localId === chatId) || null;
+  }
+
+  function writeChatMessages(chatId, nextMessages) {
+    const normalized = normalizeSidebarMessages(nextMessages);
+    const chat = getChatById(chatId);
+    if (chat) {
+      chat.messages = [...normalized];
+      chat.updatedAt = new Date().toISOString();
+    }
+    if (chat && (sidebarState.activeChatId === chat.id || sidebarState.activeChatId === chat.localId || sidebarState.activeChatId === chatId)) {
+      sidebarState.activeMessages = [...normalized];
+    }
+    return normalized;
+  }
+
+  function mutateChatMessages(chatId, updater) {
+    const chat = getChatById(chatId);
+    if (!chat) return [];
+
+    const currentMessages = (sidebarState.activeChatId === chat.id || sidebarState.activeChatId === chat.localId || sidebarState.activeChatId === chatId)
+      ? [...sidebarState.activeMessages]
+      : normalizeSidebarMessages(chat.messages || []);
+    const nextMessages = updater(currentMessages) || currentMessages;
+    return writeChatMessages(chatId, nextMessages);
+  }
+
+  function queueSidebarSolveRequest(data, options = {}) {
+    if (!isExtensionActive) return null;
+    const sidebar = getOrCreateSidebar();
+    if (!sidebar) return null;
+
+    ensureActiveChat(sidebar);
+    const chatId = sidebarState.activeChatId;
+    if (!chatId) return null;
+
+    sidebarState.view = "chat";
+    openSidebar(sidebar);
+
+    const userMessage = createSidebarMessage({
+      role: "user",
+      content: options.content || formatSidebarQuestionMessage(data),
+      messageType: options.imageDataUrl ? "image" : "text",
+      imageDataUrl: options.imageDataUrl || "",
+      questionType: data.questionType || "",
+      questionHash: data.questionHash || ""
+    });
+    const loadingMessage = createSidebarMessage({
+      role: "assistant",
+      content: "Thinking...",
+      loading: true,
+      questionType: data.questionType || "",
+      questionHash: data.questionHash || ""
+    });
+
+    mutateChatMessages(chatId, (messages) => [...messages, userMessage, loadingMessage]);
+    renderSidebarContent(sidebar);
+    autoSaveChat();
+
+    return {
+      chatId,
+      loadingMessageId: loadingMessage.id
+    };
+  }
+
+  function completeSidebarSolveRequest(requestState, data) {
+    if (!requestState?.chatId || !requestState?.loadingMessageId) return;
+    const sidebar = document.querySelector(".qsa-sidebar-chat");
+    const replacement = createSidebarMessage({
+      id: requestState.loadingMessageId,
+      role: "assistant",
+      content: formatSidebarAssistantMessage(data),
+      questionType: data.questionType || "",
+      confidence: data.confidence || "",
+      questionHash: data.questionHash || ""
+    });
+
+    mutateChatMessages(requestState.chatId, (messages) => {
+      const nextMessages = messages.map((message) =>
+        message.id === requestState.loadingMessageId ? replacement : message
+      );
+      if (!nextMessages.some(message => message.id === requestState.loadingMessageId)) {
+        nextMessages.push(replacement);
+      }
+      return nextMessages;
+    });
+
+    if (sidebar) {
+      renderSidebarContent(sidebar);
+    }
+    autoSaveChat();
   }
 
   function createSidebarElements() {
@@ -1224,18 +1367,24 @@
     toggle.style.right = sidebarState.isOpen ? "340px" : "0";
     toggle.textContent = sidebarState.isOpen ? ">" : "<";
     toggle.style.opacity = "1";
+    toggle.style.display = settings.hideSidebarHandle ? "none" : "block";
   }
 
-  function openSidebar() {
+  function openSidebar(sidebar = document.querySelector(".qsa-sidebar-chat")) {
     if (!isExtensionActive) return;
+    sidebar = sidebar || getOrCreateSidebar();
     sidebarState.isOpen = true;
-    applySidebarOpenState();
+    if (sidebar) {
+      renderSidebarContent(sidebar);
+    }
+    applySidebarOpenState(sidebar);
   }
 
-  function closeSidebar() {
+  function closeSidebar(sidebar = document.querySelector(".qsa-sidebar-chat")) {
     if (!isExtensionActive) return;
     sidebarState.isOpen = false;
-    applySidebarOpenState();
+    sidebar = sidebar || document.querySelector(".qsa-sidebar-chat");
+    applySidebarOpenState(sidebar);
   }
 
   async function initializeSidebarState(sidebar) {
@@ -1264,19 +1413,33 @@
     hydrateChatsFromFirebase(sidebar);
   }
 
+  function normalizeStoredChat(chat, index = 0) {
+    return {
+      id: chat?.id || `chat_${index}_${Date.now()}`,
+      localId: chat?.localId || "",
+      title: chat?.title || "New Chat",
+      messages: normalizeSidebarMessages(chat?.messages || []),
+      createdAt: chat?.createdAt || new Date().toISOString(),
+      updatedAt: chat?.updatedAt || new Date().toISOString(),
+      titleSet: !!chat?.titleSet,
+      messageCount: Number(chat?.messageCount || (chat?.messages || []).length || 0),
+      lastMessagePreview: chat?.lastMessagePreview || ""
+    };
+  }
+
   function restoreLocalChats() {
     chrome.storage.local.get("qsa_sidebar_chats", (result) => {
       if (sidebarState.authStatus !== "signed_in" || sidebarState.chatStatus !== "loading") {
         return;
       }
 
-      const localChats = result.qsa_sidebar_chats || [];
+      const localChats = (result.qsa_sidebar_chats || []).map((chat, index) => normalizeStoredChat(chat, index));
       sidebarState.chats = localChats;
 
       if (localChats.length > 0) {
         const activeChat = localChats.find(chat => chat.id === sidebarState.activeChatId) || localChats[0];
         sidebarState.activeChatId = activeChat?.id || null;
-        sidebarState.activeMessages = [...(activeChat?.messages || [])];
+        sidebarState.activeMessages = normalizeSidebarMessages(activeChat?.messages || []);
       } else {
         sidebarState.activeChatId = null;
         sidebarState.activeMessages = [];
@@ -1558,7 +1721,7 @@
 
         const meta = document.createElement("div");
         Object.assign(meta.style, { fontSize: "10px", color: "#64748b", marginTop: "2px" });
-        const msgCount = (chat.messages || []).length;
+        const msgCount = Number(chat.messageCount || (chat.messages || []).length || 0);
         meta.textContent = `${msgCount} messages`;
         textDiv.appendChild(meta);
 
@@ -1566,7 +1729,7 @@
 
         item.addEventListener("click", () => {
           sidebarState.activeChatId = chat.id;
-          sidebarState.activeMessages = [...(chat.messages || [])];
+          sidebarState.activeMessages = normalizeSidebarMessages(chat.messages || []);
           sidebarState.view = "chat";
           renderSidebarContent(sidebar);
         });
@@ -1601,6 +1764,56 @@
     sidebar.appendChild(listArea);
   }
 
+  function renderSidebarMessageBubble(msg) {
+    const bubble = document.createElement("div");
+    const isUser = msg.role === "user";
+
+    Object.assign(bubble.style, {
+      padding: "10px 14px",
+      borderRadius: "12px",
+      maxWidth: "90%",
+      wordBreak: "break-word",
+      whiteSpace: "pre-wrap",
+      fontSize: "13px",
+      lineHeight: "1.5",
+      alignSelf: isUser ? "flex-end" : "flex-start",
+      backgroundColor: isUser ? "rgba(99, 102, 241, 0.2)" : "rgba(255,255,255,0.05)",
+      border: `1px solid ${isUser ? "rgba(99,102,241,0.3)" : "rgba(255,255,255,0.06)"}`,
+      color: "#e2e8f0",
+      display: "flex",
+      flexDirection: "column",
+      gap: "8px"
+    });
+
+    if (msg.loading) {
+      bubble.style.opacity = "0.6";
+      bubble.style.fontStyle = "italic";
+    }
+
+    if (msg.imageDataUrl) {
+      const image = document.createElement("img");
+      image.src = msg.imageDataUrl;
+      image.alt = msg.content || "Captured screenshot";
+      Object.assign(image.style, {
+        width: "100%",
+        maxWidth: "220px",
+        borderRadius: "10px",
+        border: "1px solid rgba(255,255,255,0.08)",
+        objectFit: "cover",
+        background: "rgba(15,23,42,0.6)"
+      });
+      bubble.appendChild(image);
+    }
+
+    if (msg.content) {
+      const body = document.createElement("div");
+      body.textContent = msg.content;
+      bubble.appendChild(body);
+    }
+
+    return bubble;
+  }
+
   function renderChatView(sidebar) {
     // Messages area
     const messagesArea = document.createElement("div");
@@ -1631,30 +1844,7 @@
       messagesArea.appendChild(welcome);
     } else {
       for (const msg of sidebarState.activeMessages) {
-        const bubble = document.createElement("div");
-        const isUser = msg.role === "user";
-
-        Object.assign(bubble.style, {
-          padding: "10px 14px",
-          borderRadius: "12px",
-          maxWidth: "90%",
-          wordBreak: "break-word",
-          whiteSpace: "pre-wrap",
-          fontSize: "13px",
-          lineHeight: "1.5",
-          alignSelf: isUser ? "flex-end" : "flex-start",
-          backgroundColor: isUser ? "rgba(99, 102, 241, 0.2)" : "rgba(255,255,255,0.05)",
-          border: `1px solid ${isUser ? "rgba(99,102,241,0.3)" : "rgba(255,255,255,0.06)"}`,
-          color: "#e2e8f0"
-        });
-
-        if (msg.loading) {
-          bubble.style.opacity = "0.6";
-          bubble.style.fontStyle = "italic";
-        }
-
-        bubble.textContent = msg.content;
-        messagesArea.appendChild(bubble);
+        messagesArea.appendChild(renderSidebarMessageBubble(msg));
       }
     }
 
@@ -1706,24 +1896,39 @@
       const text = input.value.trim();
       if (!text) return;
       ensureActiveChat(sidebar);
+      const chatId = sidebarState.activeChatId;
+      if (!chatId) return;
 
-      sidebarState.activeMessages.push({ role: "user", content: text, timestamp: new Date().toISOString() });
-      sidebarState.activeMessages.push({ role: "assistant", content: "Thinking...", loading: true });
+      const userMessage = createSidebarMessage({ role: "user", content: text });
+      const loadingMessage = createSidebarMessage({ role: "assistant", content: "Thinking...", loading: true });
+
+      mutateChatMessages(chatId, (messages) => [...messages, userMessage, loadingMessage]);
       renderSidebarContent(sidebar);
+      autoSaveChat();
       input.value = "";
 
       chrome.runtime.sendMessage({
         type: "chat_message",
         userMessage: text,
-        conversationHistory: sidebarState.activeMessages.filter(m => !m.loading)
+        conversationHistory: normalizeSidebarMessages(getChatById(chatId)?.messages || []).filter(m => !m.loading)
       }, (response) => {
-        sidebarState.activeMessages = sidebarState.activeMessages.filter(m => !m.loading);
+        const assistantMessage = createSidebarMessage({
+          id: loadingMessage.id,
+          role: "assistant",
+          content: response && response.type === "chat_response"
+            ? response.response
+            : "Error: " + (response?.error || "Failed")
+        });
 
-        if (response && response.type === "chat_response") {
-          sidebarState.activeMessages.push({ role: "assistant", content: response.response, timestamp: new Date().toISOString() });
-        } else {
-          sidebarState.activeMessages.push({ role: "assistant", content: "Error: " + (response?.error || "Failed"), timestamp: new Date().toISOString() });
-        }
+        mutateChatMessages(chatId, (messages) => {
+          const nextMessages = messages.map((message) =>
+            message.id === loadingMessage.id ? assistantMessage : message
+          );
+          if (!nextMessages.some((message) => message.id === loadingMessage.id)) {
+            nextMessages.push(assistantMessage);
+          }
+          return nextMessages;
+        });
         renderSidebarContent(sidebar);
         autoSaveChat();
       });
@@ -1806,11 +2011,11 @@
 
     chrome.runtime.sendMessage({ type: "firebase_get_chats" }, (res) => {
       if (res && Array.isArray(res.chats) && res.chats.length > 0) {
-        sidebarState.chats = [...res.chats];
+        sidebarState.chats = res.chats.map((chat, index) => normalizeStoredChat(chat, index));
 
         const activeChat = sidebarState.chats.find(c => c.id === sidebarState.activeChatId) || sidebarState.chats[0];
         sidebarState.activeChatId = activeChat?.id || null;
-        sidebarState.activeMessages = [...(activeChat?.messages || [])];
+        sidebarState.activeMessages = normalizeSidebarMessages(activeChat?.messages || []);
         sidebarState.chatStatus = "ready";
         sidebarState.chatError = "";
         saveChatsToLocal();
@@ -1845,13 +2050,18 @@
 
     const title = "Chat " + new Date().toLocaleTimeString();
     const chatId = "local_" + Date.now();
+    const createdAt = new Date().toISOString();
 
     const newChat = {
       id: chatId,
+      localId: chatId,
       title: title,
       messages: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      createdAt,
+      updatedAt: createdAt,
+      titleSet: false,
+      messageCount: 0,
+      lastMessagePreview: ""
     };
 
     sidebarState.chats.unshift(newChat);
@@ -1865,8 +2075,12 @@
 
     chrome.runtime.sendMessage({ type: "firebase_create_chat", title }, (res) => {
       if (res && res.chat) {
+        const previousId = newChat.id;
+        newChat.localId = previousId;
         newChat.id = res.chat.id;
-        sidebarState.activeChatId = res.chat.id;
+        if (sidebarState.activeChatId === previousId) {
+          sidebarState.activeChatId = res.chat.id;
+        }
         saveChatsToLocal();
         autoSaveChat();
       }
@@ -1883,22 +2097,28 @@
   function autoSaveChat() {
     if (!sidebarState.activeChatId) return;
 
-    const nonLoadingMessages = sidebarState.activeMessages.filter(m => !m.loading);
+    const chat = getChatById(sidebarState.activeChatId);
+    if (!chat) return;
 
-    // Always save locally
-    const chat = sidebarState.chats.find(c => c.id === sidebarState.activeChatId);
-    if (chat) {
-      chat.messages = [...nonLoadingMessages];
-      chat.updatedAt = new Date().toISOString();
-      // Auto-title from first user message
-      if (!chat.titleSet && nonLoadingMessages.length > 0) {
-        const firstUser = nonLoadingMessages.find(m => m.role === "user");
-        if (firstUser) {
-          chat.title = firstUser.content.slice(0, 40) + (firstUser.content.length > 40 ? "..." : "");
-          chat.titleSet = true;
-        }
+    chat.messages = normalizeSidebarMessages(sidebarState.activeMessages);
+    chat.updatedAt = new Date().toISOString();
+
+    const nonLoadingMessages = chat.messages
+      .filter(m => !m.loading)
+      .map(({ loading, ...message }) => ({ ...message }));
+
+    if (!chat.titleSet && nonLoadingMessages.length > 0) {
+      const firstUser = nonLoadingMessages.find(m => m.role === "user");
+      if (firstUser) {
+        chat.title = firstUser.content.slice(0, 40) + (firstUser.content.length > 40 ? "..." : "");
+        chat.titleSet = true;
       }
     }
+    chat.messageCount = nonLoadingMessages.length;
+    const lastMessage = nonLoadingMessages[nonLoadingMessages.length - 1];
+    chat.lastMessagePreview = lastMessage
+      ? (lastMessage.imageDataUrl && !lastMessage.content ? "[image]" : String(lastMessage.content || "").slice(0, 120))
+      : "";
     saveChatsToLocal();
 
     // Also sync to Firebase if logged in
@@ -1912,7 +2132,17 @@
   }
 
   function saveChatsToLocal() {
-    chrome.storage.local.set({ qsa_sidebar_chats: sidebarState.chats });
+    const serializableChats = sidebarState.chats.map((chat, index) => {
+      const normalizedChat = normalizeStoredChat(chat, index);
+      return {
+        ...normalizedChat,
+        messages: normalizedChat.messages
+          .filter((message) => !message.loading)
+          .map(({ loading, ...message }) => ({ ...message })),
+        messageCount: normalizedChat.messages.filter((message) => !message.loading).length
+      };
+    });
+    chrome.storage.local.set({ qsa_sidebar_chats: serializableChats });
   }
 
   function teardownExtensionUi() {
@@ -1956,6 +2186,34 @@
     if (hashBanner) hashBanner.remove();
     lastFloatingAnswerKey = "";
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  }
+
+  function downscaleCanvas(canvas, maxDimension = 1280) {
+    if (!canvas) return null;
+    const longestSide = Math.max(canvas.width, canvas.height);
+    if (!longestSide || longestSide <= maxDimension) {
+      return canvas;
+    }
+
+    const scale = maxDimension / longestSide;
+    const resized = document.createElement("canvas");
+    resized.width = Math.max(1, Math.round(canvas.width * scale));
+    resized.height = Math.max(1, Math.round(canvas.height * scale));
+    const ctx = resized.getContext("2d");
+    ctx.drawImage(canvas, 0, 0, resized.width, resized.height);
+    return resized;
+  }
+
+  function canvasToCompressedDataUrl(canvas, options = {}) {
+    const maxDimension = options.maxDimension || 1280;
+    const quality = options.quality ?? 0.72;
+    const mimeType = options.mimeType || "image/jpeg";
+    const resizedCanvas = downscaleCanvas(canvas, maxDimension);
+    return resizedCanvas?.toDataURL(mimeType, quality) || "";
+  }
+
+  function dataUrlToBase64(dataUrl) {
+    return String(dataUrl || "").split(",")[1] || "";
   }
 
   // ─── Region Screenshot ─────────────────────────────────────────────
@@ -2025,39 +2283,87 @@
             canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
             const ctx = canvas.getContext("2d");
             ctx.drawImage(img, rect.x * dpr, rect.y * dpr, rect.width * dpr, rect.height * dpr, 0, 0, canvas.width, canvas.height);
-            const base64 = canvas.toDataURL("image/png").split(",")[1];
+            const previewDataUrl = canvasToCompressedDataUrl(canvas, { maxDimension: 1280, quality: 0.72, mimeType: "image/jpeg" });
+            const base64 = dataUrlToBase64(previewDataUrl);
+            const questionText = "What is the answer to the question shown in this image?";
+            const questionHash = "region_" + Date.now();
+            const queuedSolve = queueSidebarSolveRequest({
+              question: questionText,
+              options: [],
+              questionType: "image",
+              userAnswer: null,
+              questionHash
+            }, {
+              content: "Captured region screenshot",
+              imageDataUrl: previewDataUrl
+            });
 
             chrome.runtime.sendMessage({
               type: "solve_question",
-              question: "What is the answer to the question shown in this image?",
+              question: questionText,
               options: [], questionType: "image",
               imageBase64: base64,
-              questionHash: "region_" + Date.now(),
+              questionHash,
               userAnswer: null
             }, (resp) => {
+              if (chrome.runtime.lastError) {
+                const runtimeError = chrome.runtime.lastError.message || "Request failed";
+                const errorData = {
+                  answer: "Error: " + runtimeError,
+                  full: "Error: " + runtimeError,
+                  explanation: "",
+                  confidence: "low",
+                  question: questionText,
+                  userAnswer: null,
+                  questionType: "image",
+                  options: [],
+                  questionHash
+                };
+                completeSidebarSolveRequest(queuedSolve, errorData);
+                displayError(runtimeError);
+                return;
+              }
+
               if (resp && resp.type !== "error") {
                 const answerData = {
                   ...resp,
-                  question: "What is the answer to the question shown in this image?",
+                  question: questionText,
                   userAnswer: null,
                   questionType: "image",
-                  options: []
+                  options: [],
+                  questionHash
                 };
 
-                addToSidebar(answerData);
+                completeSidebarSolveRequest(queuedSolve, answerData);
                 displayAnswer(answerData);
               } else if (resp && resp.error) {
-                addToSidebar({
+                const errorData = {
                   answer: "Error: " + resp.error,
                   full: "Error: " + resp.error,
                   explanation: "",
                   confidence: "low",
-                  question: "What is the answer to the question shown in this image?",
+                  question: questionText,
                   userAnswer: null,
                   questionType: "image",
-                  options: []
-                });
+                  options: [],
+                  questionHash
+                };
+                completeSidebarSolveRequest(queuedSolve, errorData);
                 displayError(resp.error);
+              } else {
+                const errorData = {
+                  answer: "Error: Failed to solve screenshot",
+                  full: "Error: Failed to solve screenshot",
+                  explanation: "",
+                  confidence: "low",
+                  question: questionText,
+                  userAnswer: null,
+                  questionType: "image",
+                  options: [],
+                  questionHash
+                };
+                completeSidebarSolveRequest(queuedSolve, errorData);
+                displayError("Failed to solve screenshot");
               }
             });
           };
@@ -2718,7 +3024,11 @@
             0, 0, canvas.width, canvas.height
           );
 
-          resolve(canvas.toDataURL("image/png").split(",")[1]);
+          resolve(dataUrlToBase64(canvasToCompressedDataUrl(canvas, {
+            maxDimension: 1280,
+            quality: 0.78,
+            mimeType: "image/jpeg"
+          })));
         };
         img.onerror = () => resolve(null);
         img.src = response.dataUrl;
