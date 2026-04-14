@@ -16,7 +16,7 @@ export function initScreenshotSection(settings) {
   html += `<label class="qsa-radio-item">`;
   html += `<input type="radio" name="screenshotMode" value="regionSelect" ${settings.screenshotMode === "regionSelect" ? "checked" : ""}>`;
   html += `<div><div class="qsa-radio-label">Region select</div>`;
-  html += `<div class="qsa-radio-desc">Draw a rectangle to capture specific area</div></div>`;
+  html += `<div class="qsa-radio-desc">Manual only. Use the hotkey to draw a specific capture area</div></div>`;
   html += `</label>`;
 
   html += `</div></div>`;
@@ -37,7 +37,7 @@ export function initScreenshotSection(settings) {
   html += `<span class="qsa-toggle-label">Include screenshot in AI call</span>`;
   html += `<label class="qsa-toggle"><input type="checkbox" id="qsa-include-screenshot" ${settings.includeScreenshot !== false ? "checked" : ""}><span class="qsa-toggle-track"></span></label>`;
   html += `</div>`;
-  html += `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Only works with vision-capable models</div>`;
+  html += `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Only works with vision-capable models. Region select stays manual even when enabled.</div>`;
   html += `</div>`;
 
   section.innerHTML = html;

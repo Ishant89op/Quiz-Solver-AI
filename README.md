@@ -10,7 +10,8 @@ Works on Duolingo, Khan Academy, Coursera, Quizlet, custom LMS platforms, and an
 
 - Auto-detects MCQ (single/multi), fill-in-the-blank, cloze, and image-based questions
 - Supports 9 AI providers: Claude, OpenAI, Gemini, Qwen, Mistral, Groq, OpenRouter, Ollama (local), and any custom OpenAI-compatible endpoint
-- 6 stealth display modes: floating dot, URL hash, console log, sidebar panel, tooltip on selection, hidden field
+- 4 display modes: floating dot, URL hash, sidebar panel, and no-visual auto-fill
+- Google sign-in is required before solving, with persistent Firestore-backed sidebar chat/history
 - Screenshot capture: auto-capture question elements or manual region select for image questions
 - Vision model support for Claude, GPT-4o, and Gemini
 - Answer diff view: compares your selection against the correct answer
@@ -21,7 +22,7 @@ Works on Duolingo, Khan Academy, Coursera, Quizlet, custom LMS platforms, and an
 - Token usage tracking
 - Full keyboard navigation and hotkey customization
 - Dark, light, and system theme options
-- All API keys pre-configured and secured - nothing sent to extension servers
+- Direct provider requests with optional Firebase-backed chat sign-in
 
 ---
 
@@ -50,7 +51,7 @@ Works on Duolingo, Khan Academy, Coursera, Quizlet, custom LMS platforms, and an
 
 Click the extension icon to open settings. Select your provider from the **Provider** tab.
 
-API keys are pre-configured and secured. No key entry is required by the user.
+Some providers may already have bundled credentials configured. Requests go directly to the selected provider, and local endpoints can still be entered manually where supported.
 
 ### 2. Select a Model
 
@@ -71,9 +72,21 @@ Each provider has pre-populated model options. Models with `[V]` support vision 
 
 Click **Test Connection** in the Provider tab to verify your setup works.
 
+### 4. Enable Google Sign-In for Local Unpacked Installs
+
+If you use the sidebar chat sign-in flow during local development, authorize this exact Chrome extension redirect URI in your Google OAuth web client:
+
+- `https://mofhdjfbodccmpeeklpehejamblhfdhn.chromiumapp.org/`
+
+Also add this host to Firebase Auth authorized domains:
+
+- `mofhdjfbodccmpeeklpehejamblhfdhn.chromiumapp.org`
+
 ---
 
 ## Usage
+
+Sign in with Google from the persistent sidebar before solving questions. The sidebar stores chat history in Firestore and remains available in every display mode.
 
 ### Automatic Mode (default)
 
@@ -93,19 +106,17 @@ Set **Auto-trigger** to off in the Trigger tab. Then use the activation hotkey (
 |---|---|
 | **Floating Dot** | Small colored circle in bottom-right. Hover to see answer, click to pin. |
 | **URL Hash** | Writes answer to `#answer-...` in the address bar. No visible UI. |
-| **Console Log** | Styled output in DevTools console (F12). |
 | **Sidebar** | 220px panel slides from the right with session history. |
-| **Tooltip** | Select question text, answer appears above selection. |
-| **Hidden Field** | Invisible input element, focus with hotkey to read. |
+| **None** | Auto-fills silently with no extra visible UI. |
 
 ### Screenshot / Image Questions
 
 For image-based questions:
 
 - **Auto-capture**: Automatically screenshots the question container
-- **Region select**: Press `Alt+Shift+S` (or your custom hotkey), draw a rectangle around the question
+- **Region select**: Press `Alt+Shift+S` (or your custom hotkey) to manually draw a rectangle around the question
 
-Screenshots are sent to vision-capable models only (Claude, GPT-4o, Gemini).
+Screenshots are sent to vision-capable models only (Claude, GPT-4o, Gemini). Region select is manual-only.
 
 ---
 
@@ -130,19 +141,23 @@ Hotkeys can be changed in the Trigger and Capture tabs.
 | **Detection** | Global toggle, image detection, debounce delay, per-site list |
 | **Trigger** | Auto-trigger, interaction gate, activation hotkey |
 | **History** | View/export/clear answer history |
-| **Privacy** | URL stripping, option anonymisation |
+| **Privacy** | URL stripping and request-routing details |
 | **Theme** | Dark/light/system, accent color, overlay opacity |
 
 ---
 
 ## Privacy
 
-- All API keys are pre-configured and obfuscated in the extension source
-- Keys are never exposed to end users
-- No data is sent to any extension servers
-- Questions are sent only to the AI provider you configure
+- Requests go directly to the configured AI provider and Firebase when chat sign-in is used
+- The extension does not proxy requests through its own backend
+- Provider credentials may be bundled with the extension or stored locally depending on configuration
 - Enable "Never send full page URL" to strip URLs to domain only
-- Enable "Anonymise option text" to obfuscate answer choices
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md) for release notes.
 
 ---
 
@@ -204,10 +219,7 @@ Quiz-Solver-AI/
       index.js               - Display mode dispatcher
       floatingDot.js         - Floating dot + frosted card
       urlHash.js             - URL hash mode
-      consoleLog.js          - Console log mode
       sidebar.js             - Sidebar panel mode
-      tooltip.js             - Tooltip on selection mode
-      hiddenField.js         - Hidden field mode
     screenshot/
       index.js               - Screenshot dispatcher
       autoCapture.js         - Auto element capture

@@ -1,17 +1,18 @@
 import * as floatingDot from "./floatingDot.js";
 import * as urlHash from "./urlHash.js";
-import * as consoleLog from "./consoleLog.js";
 import * as sidebar from "./sidebar.js";
-import * as tooltip from "./tooltip.js";
-import * as hiddenField from "./hiddenField.js";
+
+const none = {
+  mount() {},
+  unmount() {},
+  update() {}
+};
 
 const modes = {
   floatingDot,
   urlHash,
-  consoleLog,
   sidebar,
-  tooltip,
-  hiddenField
+  none
 };
 
 export function show(mode, data, settings) {

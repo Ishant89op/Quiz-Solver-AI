@@ -12,18 +12,16 @@ export function initPrivacySection(settings) {
   html += `</div>`;
   html += `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">Strips URL to domain only before sending</div>`;
 
-  html += `<div class="qsa-toggle-row">`;
-  html += `<span class="qsa-toggle-label">Anonymise option text before sending</span>`;
-  html += `<label class="qsa-toggle"><input type="checkbox" id="qsa-anonymise" ${settings.anonymiseOptions ? "checked" : ""}><span class="qsa-toggle-track"></span></label>`;
-  html += `</div>`;
+  html += `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Option anonymisation is not available in this build.</div>`;
 
   html += `</div>`;
 
   html += `<div class="qsa-divider"></div>`;
 
   html += `<div class="qsa-info">`;
-  html += `All API keys are stored locally in your browser. Nothing is sent to any extension servers. `;
-  html += `Questions and answers are sent only to the AI provider you configure.`;
+  html += `Sign-in with Google is required before the extension will solve questions. `;
+  html += `This extension sends prompts directly to the configured AI provider and Firebase when you use the sidebar. `;
+  html += `It does not proxy requests through its own backend. Provider credentials may be bundled with the extension or stored locally depending on configuration.`;
   html += `</div>`;
 
   section.innerHTML = html;
@@ -32,7 +30,4 @@ export function initPrivacySection(settings) {
     saveSetting("stripUrl", e.target.checked);
   });
 
-  document.getElementById("qsa-anonymise").addEventListener("change", (e) => {
-    saveSetting("anonymiseOptions", e.target.checked);
-  });
 }

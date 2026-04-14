@@ -1,96 +1,5 @@
 import { saveSetting, saveModel, saveTemperature, getModel, getTemperature } from "../popup.js";
-
-const PROVIDERS = {
-  claude: "Claude (Anthropic)",
-  openai: "OpenAI",
-  gemini: "Google Gemini",
-  qwen: "Qwen (Alibaba)",
-  mistral: "Mistral",
-  groq: "Groq",
-  openrouter: "OpenRouter",
-  ollama: "Ollama (Local)",
-  custom: "Custom OpenAI-compatible"
-};
-
-const MODELS = {
-  claude: [
-    { id: "claude-opus-4-5", label: "Claude Opus 4.5", vision: true },
-    { id: "claude-sonnet-4-5", label: "Claude Sonnet 4.5", vision: true },
-    { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", vision: true }
-  ],
-  openai: [
-    { id: "gpt-4.1", label: "GPT-4.1", vision: true },
-    { id: "gpt-4.1-mini", label: "GPT-4.1 Mini", vision: true },
-    { id: "gpt-4.1-nano", label: "GPT-4.1 Nano", vision: true },
-    { id: "gpt-4o", label: "GPT-4o", vision: true },
-    { id: "gpt-4o-mini", label: "GPT-4o Mini", vision: true },
-    { id: "gpt-4-turbo", label: "GPT-4 Turbo", vision: true },
-    { id: "o3", label: "o3", vision: true },
-    { id: "o4-mini", label: "o4 Mini", vision: true }
-  ],
-  gemini: [
-    { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro", vision: true },
-    { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite", vision: true },
-    { id: "gemini-3-flash", label: "Gemini 3 Flash", vision: true },
-    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", vision: true },
-    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", vision: true },
-    { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite", vision: true },
-    { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", vision: true },
-    { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite", vision: true }
-  ],
-  qwen: [
-    { id: "qwen-turbo", label: "Qwen Turbo", vision: false },
-    { id: "qwen-plus", label: "Qwen Plus", vision: false },
-    { id: "qwen-max", label: "Qwen Max", vision: false },
-    { id: "qwen-vl-plus", label: "Qwen VL Plus", vision: true }
-  ],
-  mistral: [
-    { id: "mistral-small-latest", label: "Mistral Small", vision: false },
-    { id: "mistral-medium-latest", label: "Mistral Medium", vision: false },
-    { id: "mistral-large-latest", label: "Mistral Large", vision: false },
-    { id: "pixtral-large-latest", label: "Pixtral Large", vision: true },
-    { id: "codestral-latest", label: "Codestral", vision: false }
-  ],
-  groq: [
-    { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", vision: false },
-    { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B", vision: false },
-    { id: "llama3-70b-8192", label: "Llama 3 70B", vision: false },
-    { id: "llama3-8b-8192", label: "Llama 3 8B", vision: false },
-    { id: "mixtral-8x7b-32768", label: "Mixtral 8x7B", vision: false },
-    { id: "gemma2-9b-it", label: "Gemma 2 9B", vision: false }
-  ],
-  openrouter: [
-    { id: "google/gemini-2.5-flash-preview", label: "Gemini 2.5 Flash", vision: true },
-    { id: "google/gemini-2.5-pro-preview", label: "Gemini 2.5 Pro", vision: true },
-    { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4", vision: true },
-    { id: "anthropic/claude-haiku-4", label: "Claude Haiku 4", vision: true },
-    { id: "openai/gpt-4.1-mini", label: "GPT-4.1 Mini", vision: true },
-    { id: "openai/gpt-4o-mini", label: "GPT-4o Mini", vision: true },
-    { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B", vision: false },
-    { id: "meta-llama/llama-3.1-8b-instruct:free", label: "Llama 3.1 8B (Free)", vision: false },
-    { id: "mistralai/mistral-small-3.1-24b-instruct:free", label: "Mistral Small 3.1 (Free)", vision: false },
-    { id: "deepseek/deepseek-chat-v3-0324:free", label: "DeepSeek V3 (Free)", vision: false },
-    { id: "deepseek/deepseek-r1:free", label: "DeepSeek R1 (Free)", vision: false },
-    { id: "qwen/qwen-2.5-72b-instruct:free", label: "Qwen 2.5 72B (Free)", vision: false },
-    { id: "google/gemma-3-27b-it:free", label: "Gemma 3 27B (Free)", vision: false },
-    { id: "microsoft/phi-4:free", label: "Phi-4 (Free)", vision: false },
-    { id: "nousresearch/hermes-3-llama-3.1-405b:free", label: "Hermes 3 405B (Free)", vision: false }
-  ],
-  ollama: [],
-  custom: []
-};
-
-const DEFAULT_MODELS = {
-  claude: "claude-sonnet-4-5",
-  openai: "gpt-4o-mini",
-  gemini: "gemini-2.5-flash",
-  qwen: "qwen-plus",
-  mistral: "mistral-small-latest",
-  groq: "llama-3.3-70b-versatile",
-  openrouter: "meta-llama/llama-3.1-8b-instruct:free",
-  ollama: "",
-  custom: ""
-};
+import { PROVIDERS, PROVIDER_LABELS, MODELS, DEFAULT_MODELS } from "../../shared/constants.js";
 
 export async function initProviderSection(settings) {
   const section = document.getElementById("section-provider");
@@ -100,7 +9,7 @@ export async function initProviderSection(settings) {
   html += `<div class="qsa-group-title">AI Provider</div>`;
   html += `<div class="qsa-field">`;
   html += `<select class="qsa-select" id="qsa-provider-select">`;
-  for (const [key, label] of Object.entries(PROVIDERS)) {
+  for (const [key, label] of Object.entries(PROVIDER_LABELS)) {
     html += `<option value="${key}" ${key === currentProvider ? "selected" : ""}>${label}</option>`;
   }
   html += `</select></div></div>`;
@@ -130,10 +39,12 @@ async function renderProviderConfig(provider) {
   const container = document.getElementById("qsa-provider-config");
   const currentModel = await getModel(provider);
   const temperature = await getTemperature(provider);
+  const effectiveModel = currentModel || DEFAULT_MODELS[provider] || "";
+  const usingDefaultModel = !currentModel && !!effectiveModel;
 
   let html = "";
 
-  html += `<div class="qsa-info" style="margin-bottom:12px;">API key is pre-configured and secured.</div>`;
+  html += `<div class="qsa-info" style="margin-bottom:12px;">Some providers may use bundled credentials. Requests go only to the selected provider and selected model. If that exact model fails, the extension shows the real error instead of switching providers.</div>`;
 
   if (provider === "custom") {
     const stored = await chrome.storage.local.get("qsa_custom_endpoint");
@@ -165,11 +76,25 @@ async function renderProviderConfig(provider) {
     }
     html += `</div></div>`;
     html += `<div class="qsa-model-current" id="qsa-current-model" style="font-size:11px;color:var(--text-muted);margin-top:4px;">`;
-    const activeModel = models.find(m => m.id === (currentModel || DEFAULT_MODELS[provider]));
-    html += activeModel ? `Selected: ${activeModel.label}` : "";
+    const activeModel = models.find(m => m.id === effectiveModel);
+    if (activeModel) {
+      html += usingDefaultModel ? `Effective model: ${activeModel.label} (provider default)` : `Effective model: ${activeModel.label}`;
+    }
     html += `</div>`;
   }
   html += `</div>`;
+
+  if (provider === "custom") {
+    const customLabel = currentModel
+      ? `Effective model: ${currentModel}`
+      : "Enter the exact model name to use with this provider.";
+    html += `<div class="qsa-model-current" id="qsa-current-model" style="font-size:11px;color:var(--text-muted);margin-top:-4px;margin-bottom:12px;">${customLabel}</div>`;
+  } else if (provider === "ollama") {
+    const ollamaLabel = effectiveModel
+      ? (usingDefaultModel ? `Effective model: ${effectiveModel} (provider default)` : `Effective model: ${effectiveModel}`)
+      : "Effective model will be shown after Ollama models load.";
+    html += `<div class="qsa-model-current" id="qsa-current-model" style="font-size:11px;color:var(--text-muted);margin-top:-4px;margin-bottom:12px;">${ollamaLabel}</div>`;
+  }
 
   // Temperature
   html += `<div class="qsa-field">`;
@@ -193,7 +118,15 @@ async function renderProviderConfig(provider) {
   const customModelInput = document.getElementById("qsa-model-input-custom");
   if (customModelInput) {
     customModelInput.addEventListener("change", () => {
-      if (customModelInput.value.trim()) saveModel(provider, customModelInput.value.trim());
+      const currentEl = document.getElementById("qsa-current-model");
+      if (customModelInput.value.trim()) {
+        saveModel(provider, customModelInput.value.trim());
+        if (currentEl) {
+          currentEl.textContent = `Effective model: ${customModelInput.value.trim()}`;
+        }
+      } else if (currentEl) {
+        currentEl.textContent = "Enter the exact model name to use with this provider.";
+      }
     });
   }
 
@@ -201,7 +134,13 @@ async function renderProviderConfig(provider) {
   const ollamaSelect = document.getElementById("qsa-model-select");
   if (ollamaSelect && provider === "ollama") {
     fetchOllamaModels(ollamaSelect, currentModel);
-    ollamaSelect.addEventListener("change", () => saveModel(provider, ollamaSelect.value));
+    ollamaSelect.addEventListener("change", () => {
+      saveModel(provider, ollamaSelect.value);
+      const currentEl = document.getElementById("qsa-current-model");
+      if (currentEl) {
+        currentEl.textContent = `Effective model: ${ollamaSelect.value}`;
+      }
+    });
   }
 
   // Searchable dropdown
@@ -249,7 +188,7 @@ function setupSearchableDropdown(provider, searchInput, dropdown) {
 
       const label = item.textContent.trim();
       const currentEl = document.getElementById("qsa-current-model");
-      if (currentEl) currentEl.textContent = `Selected: ${label}`;
+      if (currentEl) currentEl.textContent = `Effective model: ${label}`;
     });
   });
 
@@ -265,13 +204,23 @@ async function fetchOllamaModels(selectEl, currentModel) {
   try {
     const response = await chrome.runtime.sendMessage({ type: "fetch_ollama_models" });
     if (response && response.models && response.models.length > 0) {
+      const preferredModel = currentModel || DEFAULT_MODELS.ollama || "";
       selectEl.innerHTML = "";
       for (const m of response.models) {
         const opt = document.createElement("option");
         opt.value = m.id;
         opt.textContent = m.label + (m.vision ? " [V]" : "");
-        if (m.id === currentModel) opt.selected = true;
+        if (m.id === preferredModel) opt.selected = true;
         selectEl.appendChild(opt);
+      }
+      if (!selectEl.value && preferredModel) {
+        selectEl.value = preferredModel;
+      }
+      const activeValue = selectEl.value || preferredModel || "";
+      const currentEl = document.getElementById("qsa-current-model");
+      if (currentEl && activeValue) {
+        const suffix = !currentModel && activeValue === DEFAULT_MODELS.ollama ? " (provider default)" : "";
+        currentEl.textContent = `Effective model: ${activeValue}${suffix}`;
       }
     } else {
       selectEl.innerHTML = `<option value="">No models found</option>`;

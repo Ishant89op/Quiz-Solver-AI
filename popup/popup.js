@@ -8,29 +8,97 @@ import { initPrivacySection } from "./sections/privacy.js";
 import { initAppearanceSection } from "./sections/appearance.js";
 
 const STORAGE_PREFIX = "qsa_";
+const DEFAULT_SETTINGS = {
+  provider: "openai",
+  displayMode: "floatingDot",
+  screenshotMode: "autoCapture",
+  enabled: true,
+  autoSolve: false,
+  autoTrigger: true,
+  triggerAfterInteraction: false,
+  showExplanation: true,
+  showConfidence: true,
+  autoClearAnswer: false,
+  autoClearDelay: 10,
+  includeScreenshot: true,
+  detectionEnabled: true,
+  detectImages: true,
+  debounceDelay: 1000,
+  siteList: [],
+  theme: "dark",
+  accentColor: "#6366f1",
+  overlayOpacity: 0.92,
+  stripUrl: false,
+  anonymiseOptions: false,
+  temperature: 0.3,
+  activationHotkey: "Alt+Shift+A",
+  regionSelectHotkey: "Alt+Shift+S"
+};
 
-document.addEventListener("DOMContentLoaded", async () => {
-  const settings = await loadSettings();
+document.addEventListener("DOMContentLoaded", () => {
+  bootstrapPopup().catch((err) => {
+    console.error("[Quiz Solver AI] Popup bootstrap failed:", err);
+    renderPopupFatalError(err);
+  });
+});
+
+async function bootstrapPopup() {
+  let settings = { ...DEFAULT_SETTINGS };
+
+  try {
+    settings = await loadSettings();
+  } catch (err) {
+    console.error("[Quiz Solver AI] Failed to load settings, using defaults:", err);
+    renderPopupNotice("Saved settings could not be loaded. Showing safe defaults instead.", "warning");
+  }
 
   applyTheme(settings.theme || "dark");
-
   initNavigation();
   initMasterToggle(settings);
+  setSettingsVisibility(false);
+  await initAuthPanel();
 
-  await initProviderSection(settings);
-  initDisplaySection(settings);
-  initScreenshotSection(settings);
-  initDetectionSection(settings);
-  initTriggerSection(settings);
-  await initHistorySection(settings);
-  initPrivacySection(settings);
-  initAppearanceSection(settings);
+  await initSection("section-provider", settings, initProviderSection, "Provider settings");
+  await initSection("section-display", settings, initDisplaySection, "Display settings");
+  await initSection("section-screenshot", settings, initScreenshotSection, "Capture settings");
+  await initSection("section-detection", settings, initDetectionSection, "Detection settings");
+  await initSection("section-trigger", settings, initTriggerSection, "Trigger settings");
+  await initSection("section-history", settings, initHistorySection, "History settings");
+  await initSection("section-privacy", settings, initPrivacySection, "Privacy settings");
+  await initSection("section-appearance", settings, initAppearanceSection, "Theme settings");
 
-  updateTokenCounter();
-});
+  try {
+    await updateTokenCounter();
+  } catch (err) {
+    console.error("[Quiz Solver AI] Failed to update token counter:", err);
+    const counter = document.getElementById("qsa-token-counter");
+    if (counter) counter.textContent = "Tokens: unavailable";
+  }
+
+  updateVersionLabel();
+}
+
+async function initSection(sectionId, settings, initializer, label) {
+  const section = document.getElementById(sectionId);
+  if (!section) return;
+
+  try {
+    await initializer(settings);
+  } catch (err) {
+    console.error(`[Quiz Solver AI] Failed to initialize ${label}:`, err);
+    section.innerHTML = `
+      <div class="qsa-info" style="border:1px solid rgba(239,68,68,0.22);background:rgba(239,68,68,0.08);color:var(--text-primary);">
+        <div style="font-weight:600;margin-bottom:6px;">${label} failed to load</div>
+        <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;">${escapeHtml(err?.message || "Unknown error")}</div>
+      </div>
+    `;
+    renderPopupNotice(`Some settings failed to load. ${label} has been replaced with an error card.`, "error");
+  }
+}
 
 function initNavigation() {
   const nav = document.getElementById("qsa-nav");
+  if (!nav) return;
   const buttons = nav.querySelectorAll(".qsa-nav-btn");
   const sections = document.querySelectorAll(".qsa-section");
 
@@ -48,11 +116,42 @@ function initNavigation() {
 
 function initMasterToggle(settings) {
   const toggle = document.getElementById("qsa-enabled-toggle");
+  if (!toggle) return;
   toggle.checked = settings.enabled !== false;
+  syncMasterToggleState(toggle.checked);
 
   toggle.addEventListener("change", () => {
     saveSetting("enabled", toggle.checked);
+    syncMasterToggleState(toggle.checked);
   });
+}
+
+async function initAuthPanel() {
+  renderAuthPanel({ status: "checking" });
+
+  try {
+    const response = await sendRuntimeMessage(
+      { type: "firebase_get_user" },
+      { timeoutMs: 4000, timeoutMessage: "Sign-in check timed out. Please try again." }
+    );
+
+    if (response?.user) {
+      renderAuthPanel({ status: "signed_in", user: response.user });
+      return "signed_in";
+    }
+
+    renderAuthPanel({
+      status: "signed_out",
+      error: response?.error || ""
+    });
+    return "signed_out";
+  } catch (err) {
+    renderAuthPanel({
+      status: "signed_out",
+      error: err?.message || "Could not verify sign-in status."
+    });
+    return "signed_out";
+  }
 }
 
 async function updateTokenCounter() {
@@ -63,33 +162,7 @@ async function updateTokenCounter() {
 
 async function loadSettings() {
   const stored = await chrome.storage.local.get(null);
-  const defaults = {
-    provider: "openai",
-    displayMode: "floatingDot",
-    screenshotMode: "autoCapture",
-    enabled: true,
-    autoTrigger: true,
-    triggerAfterInteraction: false,
-    showExplanation: true,
-    showConfidence: true,
-    autoClearAnswer: false,
-    autoClearDelay: 10,
-    includeScreenshot: true,
-    detectionEnabled: true,
-    detectImages: true,
-    debounceDelay: 1000,
-    siteList: [],
-    theme: "dark",
-    accentColor: "#6366f1",
-    overlayOpacity: 0.92,
-    stripUrl: false,
-    anonymiseOptions: false,
-    temperature: 0.3,
-    activationHotkey: "Alt+Shift+A",
-    regionSelectHotkey: "Alt+Shift+S"
-  };
-
-  const settings = { ...defaults };
+  const settings = { ...DEFAULT_SETTINGS };
   for (const [key, value] of Object.entries(stored)) {
     if (key.startsWith(STORAGE_PREFIX)) {
       settings[key.slice(STORAGE_PREFIX.length)] = value;
@@ -105,6 +178,221 @@ function applyTheme(theme) {
   } else {
     document.documentElement.setAttribute("data-theme", theme);
   }
+}
+
+function syncMasterToggleState(enabled) {
+  const popup = document.getElementById("qsa-popup");
+  if (!popup) return;
+  popup.dataset.extensionEnabled = enabled ? "true" : "false";
+
+  if (enabled) {
+    renderPopupNotice("");
+    return;
+  }
+
+  renderPopupNotice("Extension is off. Page scanning, the sidebar, hotkeys, and answer displays stay disabled until you turn it back on.", "warning");
+}
+
+function updateVersionLabel() {
+  const versionEl = document.getElementById("qsa-version");
+  if (!versionEl) return;
+  versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
+}
+
+function renderAuthPanel({ status, user = null, error = "" }) {
+  const content = document.getElementById("qsa-content");
+  if (!content) return;
+  setSettingsVisibility(status === "signed_in");
+
+  let panel = document.getElementById("qsa-auth-panel");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "qsa-auth-panel";
+    content.parentElement?.insertBefore(panel, content);
+  }
+
+  panel.style.cssText = [
+    "margin: 10px 16px 0",
+    "padding: 12px",
+    "border: 1px solid rgba(255,255,255,0.06)",
+    "background: var(--bg-secondary)",
+    "border-radius: 10px",
+    "display: flex",
+    "flex-direction: column",
+    "gap: 8px"
+  ].join(";");
+
+  const title = status === "signed_in" ? "Signed in" : status === "checking" ? "Checking sign-in" : "Sign-in required";
+  const description = status === "signed_in"
+    ? (user?.email || user?.displayName || "Your Google session is active.")
+    : status === "checking"
+      ? "Checking your Google session."
+      : "Google sign-in is required before solving questions and saving Firestore chats.";
+
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+      <div>
+        <div style="font-weight:600;font-size:12px;color:var(--text-primary);">${escapeHtml(title)}</div>
+        <div style="font-size:11px;color:var(--text-secondary);line-height:1.5;margin-top:3px;">${escapeHtml(description)}</div>
+      </div>
+      <div id="qsa-auth-panel-action"></div>
+    </div>
+    <div id="qsa-auth-panel-status" style="min-height:16px;font-size:11px;color:${error ? "#fca5a5" : "var(--text-muted)"};">${escapeHtml(error || "")}</div>
+  `;
+
+  const action = document.getElementById("qsa-auth-panel-action");
+  if (!action) return;
+
+  if (status === "checking") {
+    action.innerHTML = `<div style="font-size:11px;color:var(--text-muted);white-space:nowrap;">Please wait…</div>`;
+    return;
+  }
+
+  const button = document.createElement("button");
+  button.className = "qsa-btn qsa-btn-sm";
+  button.style.whiteSpace = "nowrap";
+
+  if (status === "signed_in") {
+    button.textContent = "Sign out";
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      const statusEl = document.getElementById("qsa-auth-panel-status");
+      if (statusEl) statusEl.textContent = "";
+
+      try {
+        await sendRuntimeMessage({ type: "firebase_logout" }, { timeoutMs: 4000, timeoutMessage: "Sign-out timed out. Please try again." });
+        renderAuthPanel({ status: "signed_out" });
+      } catch (err) {
+        button.disabled = false;
+        if (statusEl) statusEl.textContent = err?.message || "Failed to sign out.";
+      }
+    });
+  } else {
+    button.textContent = "Sign in with Google";
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      button.textContent = "Signing in...";
+      const statusEl = document.getElementById("qsa-auth-panel-status");
+      if (statusEl) statusEl.textContent = "";
+
+      try {
+        const response = await sendRuntimeMessage(
+          { type: "firebase_login" },
+          { timeoutMs: 120000, timeoutMessage: "Google sign-in timed out. Please try again." }
+        );
+
+        if (response?.user) {
+          renderAuthPanel({ status: "signed_in", user: response.user });
+          return;
+        }
+
+        renderAuthPanel({
+          status: "signed_out",
+          error: response?.error || "Sign-in failed."
+        });
+      } catch (err) {
+        renderAuthPanel({
+          status: "signed_out",
+          error: err?.message || "Sign-in failed."
+        });
+      }
+    });
+  }
+
+  action.appendChild(button);
+}
+
+function setSettingsVisibility(isSignedIn) {
+  const nav = document.getElementById("qsa-nav");
+  const content = document.getElementById("qsa-content");
+  if (nav) nav.style.display = isSignedIn ? "flex" : "none";
+  if (content) content.style.display = isSignedIn ? "block" : "none";
+}
+
+function renderPopupNotice(message, tone = "warning") {
+  const content = document.getElementById("qsa-content");
+  if (!content) return;
+
+  let notice = document.getElementById("qsa-popup-notice");
+  if (!message) {
+    notice?.remove();
+    return;
+  }
+
+  if (!notice) {
+    notice = document.createElement("div");
+    notice.id = "qsa-popup-notice";
+    content.parentElement?.insertBefore(notice, content);
+  }
+
+  const palette = tone === "error"
+    ? {
+        border: "rgba(239,68,68,0.22)",
+        background: "rgba(239,68,68,0.08)"
+      }
+    : {
+        border: "rgba(245,158,11,0.22)",
+        background: "rgba(245,158,11,0.08)"
+      };
+
+  notice.style.cssText = [
+    "margin: 10px 16px 0",
+    "padding: 10px 12px",
+    `border: 1px solid ${palette.border}`,
+    `background: ${palette.background}`,
+    "border-radius: 8px",
+    "font-size: 12px",
+    "line-height: 1.5",
+    "color: var(--text-primary)"
+  ].join(";");
+  notice.textContent = message;
+}
+
+function sendRuntimeMessage(message, options = {}) {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    let timeoutId = null;
+
+    if (options.timeoutMs) {
+      timeoutId = setTimeout(() => {
+        if (finished) return;
+        finished = true;
+        reject(new Error(options.timeoutMessage || "Request timed out"));
+      }, options.timeoutMs);
+    }
+
+    chrome.runtime.sendMessage(message, (response) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeoutId);
+
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+
+      resolve(response);
+    });
+  });
+}
+
+function renderPopupFatalError(err) {
+  renderPopupNotice("The settings popup hit a startup error. Reload the extension page and reopen the popup.", "error");
+  const activeSection = document.querySelector(".qsa-section.active") || document.getElementById("section-provider");
+  if (!activeSection) return;
+
+  activeSection.innerHTML = `
+    <div class="qsa-info" style="border:1px solid rgba(239,68,68,0.22);background:rgba(239,68,68,0.08);color:var(--text-primary);">
+      <div style="font-weight:600;margin-bottom:6px;">Popup startup failed</div>
+      <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;">${escapeHtml(err?.message || "Unknown error")}</div>
+    </div>
+  `;
+}
+
+function escapeHtml(value) {
+  const div = document.createElement("div");
+  div.textContent = String(value || "");
+  return div.innerHTML;
 }
 
 export function saveSetting(key, value) {
@@ -130,4 +418,3 @@ export async function getTemperature(provider) {
 }
 
 export { applyTheme };
-

@@ -11,46 +11,94 @@ const FIREBASE_CONFIG = {
 };
 
 const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${FIREBASE_CONFIG.projectId}/databases/(default)/documents`;
+const FIRESTORE_SETUP_URL = `https://console.cloud.google.com/datastore/setup?project=${FIREBASE_CONFIG.projectId}`;
 const AUTH_BASE = "https://identitytoolkit.googleapis.com/v1";
+const AUTH_REQUEST_TIMEOUT_MS = 6000;
+const AUTH_FLOW_TIMEOUT_MS = 90000;
+// This OAuth web client must allow the Chrome extension redirect below.
+const GOOGLE_OAUTH_CLIENT_ID = "124890716795-bgb9lkrkl158fg3n4sod02dvoijn0c1i.apps.googleusercontent.com";
+const EXPECTED_EXTENSION_ID = "mofhdjfbodccmpeeklpehejamblhfdhn";
+const EXPECTED_REDIRECT_URI = `https://${EXPECTED_EXTENSION_ID}.chromiumapp.org/`;
 
 // ─── Auth via launchWebAuthFlow ──────────────────────────────────────
 export async function signInWithGoogle() {
   return new Promise((resolve, reject) => {
     const redirectUrl = chrome.identity.getRedirectURL();
     const scopes = encodeURIComponent("openid email profile");
+    const state = createOAuthState();
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      finishReject(new Error(
+        `Google sign-in timed out before completing. If the Google auth page showed an error, add ${redirectUrl} to the OAuth redirect URIs and add ${new URL(redirectUrl).host} to Firebase Auth authorized domains.`
+      ));
+    }, AUTH_FLOW_TIMEOUT_MS);
+
+    function finishResolve(value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      resolve(value);
+    }
+
+    function finishReject(error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      reject(error);
+    }
+
+    if (redirectUrl !== EXPECTED_REDIRECT_URI) {
+      finishReject(new Error(
+        `Unexpected extension redirect URI. Reload the unpacked extension so it uses the stable ID ${EXPECTED_EXTENSION_ID}, then authorize ${EXPECTED_REDIRECT_URI} in Google OAuth and Firebase Auth.`
+      ));
+      return;
+    }
 
     // Use Firebase Auth's Google sign-in via launchWebAuthFlow
     const authUrl =
       `https://accounts.google.com/o/oauth2/v2/auth` +
-      `?client_id=124890716795-bgb9lkrkl158fg3n4sod02dvoijn0c1i.apps.googleusercontent.com` +
+      `?client_id=${encodeURIComponent(GOOGLE_OAUTH_CLIENT_ID)}` +
       `&response_type=token` +
       `&redirect_uri=${encodeURIComponent(redirectUrl)}` +
-      `&scope=${scopes}`;
+      `&scope=${scopes}` +
+      `&state=${encodeURIComponent(state)}` +
+      `&prompt=select_account`;
 
     chrome.identity.launchWebAuthFlow(
       { url: authUrl, interactive: true },
       async (responseUrl) => {
         if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
+          finishReject(createAuthFlowError(chrome.runtime.lastError.message, redirectUrl));
           return;
         }
         if (!responseUrl) {
-          reject(new Error("No response from auth flow"));
+          finishReject(new Error(
+            `No response from the Google sign-in flow. Verify that ${EXPECTED_REDIRECT_URI} is allowed in your OAuth client and Firebase Auth authorized domains.`
+          ));
           return;
         }
 
         try {
-          // Extract access_token from the redirect URL fragment
-          const hashParams = new URL(responseUrl.replace("#", "?")).searchParams;
-          const accessToken = hashParams.get("access_token");
+          const params = extractCallbackParams(responseUrl);
+          const returnedState = params.get("state");
+          const oauthError = params.get("error");
+
+          if (oauthError) {
+            throw new Error(describeOAuthError(oauthError, params.get("error_description"), redirectUrl));
+          }
+
+          if (returnedState !== state) {
+            throw new Error("Invalid Google sign-in response: state mismatch.");
+          }
+
+          const accessToken = params.get("access_token");
 
           if (!accessToken) {
-            reject(new Error("No access token in response"));
-            return;
+            throw new Error("Google sign-in did not return an access token.");
           }
 
           // Exchange Google OAuth token for Firebase ID token
-          const fbResponse = await fetch(
+          const fbResponse = await fetchWithTimeout(
             `${AUTH_BASE}/accounts:signInWithIdp?key=${FIREBASE_CONFIG.apiKey}`,
             {
               method: "POST",
@@ -61,11 +109,17 @@ export async function signInWithGoogle() {
                 returnIdpCredential: true,
                 returnSecureToken: true
               })
-            }
+            },
+            15000
           );
 
+          if (!fbResponse.ok) {
+            const errText = await fbResponse.text();
+            throw new Error(`Firebase sign-in failed (${fbResponse.status}): ${errText}`);
+          }
+
           const data = await fbResponse.json();
-          if (data.error) throw new Error(data.error.message);
+          if (data.error) throw new Error(describeFirebaseAuthError(data.error.message));
 
           const user = {
             uid: data.localId,
@@ -77,9 +131,9 @@ export async function signInWithGoogle() {
           };
 
           await chrome.storage.local.set({ qsa_firebase_user: user });
-          resolve(user);
+          finishResolve(user);
         } catch (err) {
-          reject(err);
+          finishReject(err);
         }
       }
     );
@@ -93,19 +147,25 @@ export async function signOut() {
   await chrome.storage.local.remove("qsa_firebase_user");
 }
 
-export async function getCurrentUser() {
+export async function getCurrentUser(options = {}) {
+  const { verify = true } = options;
   const stored = await chrome.storage.local.get("qsa_firebase_user");
   const user = stored.qsa_firebase_user;
   if (!user || !user.idToken) return null;
 
+  if (!verify) {
+    return user;
+  }
+
   try {
-    const check = await fetch(
+    const check = await fetchWithTimeout(
       `${AUTH_BASE}/accounts:lookup?key=${FIREBASE_CONFIG.apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ idToken: user.idToken })
-      }
+      },
+      AUTH_REQUEST_TIMEOUT_MS
     );
     const result = await check.json();
     if (result.error) {
@@ -125,16 +185,17 @@ export async function getCurrentUser() {
 
 async function refreshIdToken(refreshToken) {
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://securetoken.googleapis.com/v1/token?key=${FIREBASE_CONFIG.apiKey}`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
           grant_type: "refresh_token",
           refresh_token: refreshToken
-        })
-      }
+        }).toString()
+      },
+      AUTH_REQUEST_TIMEOUT_MS
     );
     const data = await response.json();
     return data.id_token || null;
@@ -149,6 +210,9 @@ export async function getChats(uid, idToken) {
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${idToken}` }
   });
+  if (!response.ok) {
+    throw await createFirestoreRequestError("load chats", response);
+  }
   const data = await response.json();
   if (!data.documents) return [];
 
@@ -179,6 +243,9 @@ export async function createChat(uid, idToken, title) {
       }
     })
   });
+  if (!response.ok) {
+    throw await createFirestoreRequestError("create chat", response);
+  }
   const data = await response.json();
   return {
     id: data.name.split("/").pop(),
@@ -203,7 +270,7 @@ export async function addMessageToChat(uid, idToken, chatId, messages) {
     }
   }));
 
-  await fetch(url, {
+  const response = await fetch(url, {
     method: "PATCH",
     headers: {
       Authorization: `Bearer ${idToken}`,
@@ -216,14 +283,20 @@ export async function addMessageToChat(uid, idToken, chatId, messages) {
       }
     })
   });
+  if (!response.ok) {
+    throw await createFirestoreRequestError("save chat messages", response);
+  }
 }
 
 export async function deleteChat(uid, idToken, chatId) {
   const url = `${FIRESTORE_BASE}/users/${uid}/chats/${chatId}`;
-  await fetch(url, {
+  const response = await fetch(url, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${idToken}` }
   });
+  if (!response.ok) {
+    throw await createFirestoreRequestError("delete chat", response);
+  }
 }
 
 function parseFirestoreArray(values) {
@@ -235,6 +308,117 @@ function parseFirestoreArray(values) {
       timestamp: fields.timestamp?.stringValue || ""
     };
   });
+}
+
+function createOAuthState() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function extractCallbackParams(responseUrl) {
+  const url = new URL(responseUrl);
+  const params = new URLSearchParams(url.search);
+
+  if (url.hash) {
+    const hashParams = new URLSearchParams(url.hash.slice(1));
+    for (const [key, value] of hashParams.entries()) {
+      params.set(key, value);
+    }
+  }
+
+  return params;
+}
+
+function createAuthFlowError(message, redirectUrl) {
+  const lower = (message || "").toLowerCase();
+
+  if (lower.includes("did not approve") || lower.includes("canceled")) {
+    return new Error("Google sign-in was cancelled.");
+  }
+
+  if (lower.includes("authorization page could not be loaded")) {
+    return new Error(
+      `Google sign-in could not load. Verify that ${redirectUrl} is registered as an authorized redirect URI and that ${new URL(redirectUrl).host} is an authorized Firebase Auth domain.`
+    );
+  }
+
+  return new Error(message || "Google sign-in failed.");
+}
+
+function describeOAuthError(error, description, redirectUrl) {
+  if (error === "redirect_uri_mismatch") {
+    return `Google rejected the extension redirect URI. Add ${redirectUrl} to the OAuth web client redirect URIs and add ${new URL(redirectUrl).host} to Firebase Auth authorized domains.`;
+  }
+
+  if (error === "access_denied") {
+    return "Google sign-in was denied.";
+  }
+
+  return description ? `${error}: ${description}` : `Google sign-in failed: ${error}`;
+}
+
+function describeFirebaseAuthError(message) {
+  if (!message) return "Firebase sign-in failed.";
+  if (message === "INVALID_IDP_RESPONSE" || message === "INVALID_PENDING_TOKEN") {
+    return "Firebase rejected the Google sign-in response. Recheck the OAuth client, redirect URI, and Firebase Auth provider configuration.";
+  }
+  return message;
+}
+
+async function createFirestoreRequestError(action, response) {
+  const errText = await response.text();
+  return new Error(describeFirestoreError(action, response.status, errText));
+}
+
+function describeFirestoreError(action, status, errText) {
+  const setupInstruction = `Create the default Firestore database for project ${FIREBASE_CONFIG.projectId} at ${FIRESTORE_SETUP_URL}, then reload the extension.`;
+  const rulesInstruction = `Deploy the repo's Firestore rules to project ${FIREBASE_CONFIG.projectId} with: firebase deploy --only firestore:rules`;
+
+  try {
+    const parsed = JSON.parse(errText);
+    const message = parsed?.error?.message || "";
+
+    if (
+      status === 404 &&
+      /database\s+\(default\)\s+does\s+not\s+exist/i.test(message)
+    ) {
+      return `Cloud Firestore is not set up for this Firebase project yet. ${setupInstruction}`;
+    }
+
+    if (status === 403) {
+      if (/missing or insufficient permissions/i.test(message)) {
+        return `Firestore denied access while trying to ${action}. ${rulesInstruction}`;
+      }
+
+      if (/api has not been used|api is not enabled|service is disabled/i.test(message)) {
+        return `The Firestore API is not enabled for project ${FIREBASE_CONFIG.projectId}. Enable Cloud Firestore API in Google Cloud Console, then reload the extension.`;
+      }
+
+      return `Firestore rejected the request while trying to ${action}. Check your Firestore rules and API permissions for project ${FIREBASE_CONFIG.projectId}.`;
+    }
+
+    if (message) {
+      return `Failed to ${action} (${status}): ${message}`;
+    }
+  } catch {
+    // Fall through to the raw-text fallback below.
+  }
+
+  return `Failed to ${action} (${status}): ${errText}`;
+}
+
+async function fetchWithTimeout(url, options, timeoutMs = AUTH_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 export { FIREBASE_CONFIG };

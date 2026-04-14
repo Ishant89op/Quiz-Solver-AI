@@ -8,13 +8,7 @@ export async function call(config, prompt, imageBase64 = null) {
   const modelId = model || "gemini-2.5-flash";
   const endpoint = `${PROVIDER_ENDPOINTS.gemini}/${modelId}:generateContent?key=${apiKey}`;
 
-  const parts = [];
-
-  if (systemPrompt) {
-    parts.push({ text: systemPrompt + "\n\n" + prompt });
-  } else {
-    parts.push({ text: prompt });
-  }
+  const parts = [{ text: prompt }];
 
   if (imageBase64) {
     const mimeType = imageBase64.startsWith("/9j/") ? "image/jpeg" : "image/png";
@@ -27,8 +21,14 @@ export async function call(config, prompt, imageBase64 = null) {
   }
 
   const body = {
+    ...(systemPrompt ? {
+      systemInstruction: {
+        parts: [{ text: systemPrompt }]
+      }
+    } : {}),
     contents: [
       {
+        role: "user",
         parts
       }
     ],

@@ -1,5 +1,5 @@
 import { callAI } from "./ai/index.js";
-import { MSG_TYPES, PROVIDERS, DEFAULT_MODELS, VISION_PROVIDERS } from "../shared/constants.js";
+import { MSG_TYPES, PROVIDERS, DEFAULT_MODELS, VISION_PROVIDERS, CHAT_SYSTEM_PROMPT } from "../shared/constants.js";
 import * as storage from "../shared/storage.js";
 import { parseJSON, estimateTokens } from "../shared/utils.js";
 import * as firebase from "../shared/firebase.js";
@@ -21,6 +21,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.commands.onCommand.addListener(async (command) => {
+  const settings = await storage.getSettings();
+  if (settings.enabled === false) {
+    return;
+  }
+
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) return;
 
@@ -72,8 +77,12 @@ async function handleMessage(message, sender) {
       return { type: "firebase_logout_success" };
 
     case "firebase_get_user":
-      const currentUser = await firebase.getCurrentUser();
-      return { type: "firebase_user", user: currentUser };
+      try {
+        const currentUser = await firebase.getCurrentUser({ verify: false });
+        return { type: "firebase_user", user: currentUser };
+      } catch (err) {
+        return { type: MSG_TYPES.ERROR, error: err.message || "Failed to check sign-in status" };
+      }
 
     // Firebase Chat CRUD
     case "firebase_get_chats":
@@ -124,6 +133,14 @@ async function handleMessage(message, sender) {
 async function solveQuestion(message, sender) {
   const settings = await storage.getSettings();
   const { question, options, questionType, imageBase64, questionHash, userAnswer } = message;
+  const currentUser = await firebase.getCurrentUser();
+
+  if (!currentUser) {
+    return {
+      type: MSG_TYPES.ERROR,
+      error: "Sign in with Google in the sidebar to use Quiz Solver AI."
+    };
+  }
 
   const cached = await storage.getCachedAnswer(questionHash);
   if (cached) {
@@ -138,9 +155,9 @@ async function solveQuestion(message, sender) {
 
   let prompt = buildPrompt(question, options, questionType, userAnswer, settings);
 
-  // Only pass images to vision-capable providers
+  // Keep the captured image available when the selected model can accept vision input.
   let imageData = null;
-  if (imageBase64 && settings.includeScreenshot && VISION_PROVIDERS.includes(provider)) {
+  if (imageBase64 && settings.includeScreenshot) {
     imageData = imageBase64;
   }
 
@@ -154,14 +171,11 @@ async function solveQuestion(message, sender) {
   };
 
   try {
-    const rawResponse = await callAI(provider, config, prompt, imageData);
+    const { rawResponse, modelUsed, providerUsed } = await requestQuizAnswer(provider, config, prompt, imageData, {
+      options
+    });
     const parsed = parseJSON(rawResponse);
-
-    const result = parsed || {
-      answer: rawResponse,
-      explanation: "",
-      confidence: "medium"
-    };
+    const result = normalizeQuizResult(parsed, rawResponse);
 
     const tokenEstimate = estimateTokens(prompt) + estimateTokens(rawResponse);
     await storage.addTokens(tokenEstimate);
@@ -173,13 +187,20 @@ async function solveQuestion(message, sender) {
       questionType,
       answer: result.answer,
       explanation: result.explanation,
+      full: result.full,
       confidence: result.confidence,
       userAnswer: userAnswer || null,
-      provider,
-      model
+      provider: providerUsed,
+      model: modelUsed
     });
 
-    return { type: MSG_TYPES.ANSWER_RESULT, ...result, fromCache: false };
+    return {
+      type: MSG_TYPES.ANSWER_RESULT,
+      ...result,
+      fromCache: false,
+      model: modelUsed,
+      provider: providerUsed
+    };
   } catch (err) {
     const cached = await storage.getCachedAnswer(questionHash);
     if (cached) {
@@ -190,26 +211,69 @@ async function solveQuestion(message, sender) {
 }
 
 function buildPrompt(question, options, questionType, userAnswer, settings) {
-  let prompt = `Question: ${question}\n`;
-
+  let prompt = "Answer this quiz using only the extracted data below.\n";
+  prompt += "Use every part of the question before deciding.\n\n";
+  prompt += "Question-\n";
+  prompt += `${question}\n\n`;
+  prompt += "Options-\n";
   if (options && options.length > 0) {
-    prompt += "\nOptions:\n";
     const labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     options.forEach((opt, i) => {
-      prompt += `${labels[i] || i + 1}. ${opt}\n`;
+      prompt += `(${labels[i] || i + 1}) ${opt}\n`;
     });
+  } else {
+    prompt += "None provided\n";
   }
 
   if (questionType) {
-    prompt += `\nQuestion type: ${questionType}\n`;
+    prompt += `\nQuestion type-\n${questionType}\n`;
   }
 
   if (userAnswer) {
-    prompt += `\nThe user selected: ${userAnswer}\n`;
-    prompt += "Indicate if the user's selection is correct or incorrect.\n";
+    prompt += `\nCurrent answer-\n${userAnswer}\n`;
+    prompt += "Say whether the current answer is correct.\n";
   }
 
+  prompt += "\nReturn JSON with `only_answer`, `full`, and `confidence`.\n";
+  prompt += "`only_answer` must contain just the final answer.\n";
+  prompt += "`full` must start with the final answer, then give the full explanation.\n";
+
   return prompt;
+}
+
+function normalizeQuizResult(parsed, rawResponse) {
+  const answer = getParsedValue(parsed, ["only_answer", "only-answer", "onlyAnswer", "answer"])
+    || rawResponse;
+  const full = getParsedValue(parsed, ["full", "full_explanation", "fullExplanation", "explanation"])
+    || rawResponse;
+  const confidence = normalizeConfidence(getParsedValue(parsed, ["confidence"]));
+
+  return {
+    answer: String(answer || "").trim(),
+    full: String(full || rawResponse || "").trim(),
+    explanation: String(full || rawResponse || "").trim(),
+    confidence,
+    rawResponse
+  };
+}
+
+function getParsedValue(parsed, keys) {
+  if (!parsed || typeof parsed !== "object") return "";
+  for (const key of keys) {
+    const value = parsed[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
+function normalizeConfidence(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "high" || normalized === "medium" || normalized === "low") {
+    return normalized;
+  }
+  return "medium";
 }
 
 async function testConnection(message) {
@@ -224,7 +288,14 @@ async function testConnection(message) {
   };
 
   try {
-    const response = await callAI(provider, config, "Reply with exactly: connection successful");
+    const { rawResponse } = await requestQuizAnswer(
+      provider,
+      { ...config, systemPrompt: "Reply briefly and exactly as instructed." },
+      "Reply with exactly: connection successful",
+      null,
+      { allowContentRetry: false }
+    );
+    const response = rawResponse;
     return { type: "test_result", success: true, response };
   } catch (err) {
     return { type: "test_result", success: false, error: err.message };
@@ -258,6 +329,10 @@ async function captureTab(sender) {
 
 async function handleChatMessage(message) {
   const { userMessage, conversationHistory } = message;
+  const currentUser = await firebase.getCurrentUser();
+  if (!currentUser) {
+    return { type: MSG_TYPES.ERROR, error: "Sign in with Google to use the sidebar chat." };
+  }
   const settings = await storage.getSettings();
   const provider = settings.provider;
   const apiKey = await storage.getApiKey(provider);
@@ -269,14 +344,83 @@ async function handleChatMessage(message) {
     .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
     .join("\n") + "\nUser: " + userMessage;
 
-  const config = { apiKey, model, temperature, customEndpoint };
+  const config = { apiKey, model, temperature, customEndpoint, systemPrompt: CHAT_SYSTEM_PROMPT };
 
   try {
-    const rawResponse = await callAI(provider, config, contextPrompt);
+    const { rawResponse } = await requestChatResponse(provider, config, contextPrompt);
     const tokenEstimate = estimateTokens(contextPrompt) + estimateTokens(rawResponse);
     await storage.addTokens(tokenEstimate);
     return { type: "chat_response", response: rawResponse };
   } catch (err) {
     return { type: MSG_TYPES.ERROR, error: err.message || "Chat request failed" };
   }
+}
+
+async function requestQuizAnswer(provider, config, prompt, imageData, options = {}) {
+  const allowContentRetry = options.allowContentRetry !== false;
+  const selectedModel = config.model || DEFAULT_MODELS[provider] || "";
+  const selectedConfig = {
+    ...config,
+    model: selectedModel
+  };
+  const attemptImageData = canUseVisionInput(provider, selectedModel) ? imageData : null;
+
+  let rawResponse = await callAI(provider, selectedConfig, prompt, attemptImageData);
+
+  if (allowContentRetry && shouldRetryForAmbiguousAnswer(rawResponse, options.options || [])) {
+    rawResponse = await callAI(
+      provider,
+      { ...selectedConfig, temperature: 0.1 },
+      `${prompt}\n\nChoose the single best answer from the provided options. Do not say that there is not enough information.`,
+      attemptImageData
+    );
+
+    if (shouldRetryForAmbiguousAnswer(rawResponse, options.options || [])) {
+      throw new Error("The selected model could not choose a best answer from the available options.");
+    }
+  }
+
+  return {
+    rawResponse,
+    modelUsed: selectedModel,
+    providerUsed: provider
+  };
+}
+
+async function requestChatResponse(provider, config, prompt) {
+  const selectedModel = config.model || DEFAULT_MODELS[provider] || "";
+  const selectedConfig = {
+    ...config,
+    model: selectedModel
+  };
+  const rawResponse = await callAI(provider, selectedConfig, prompt);
+
+  return {
+    rawResponse,
+    modelUsed: selectedModel,
+    providerUsed: provider
+  };
+}
+
+function canUseVisionInput(provider, model) {
+  if (!model) {
+    return VISION_PROVIDERS.includes(provider) || provider === PROVIDERS.OPENROUTER;
+  }
+
+  if (provider === PROVIDERS.OPENROUTER) {
+    return /gemini|gpt-4|gpt-4o|claude|vision|pixtral|llava|qwen-vl/i.test(model);
+  }
+  if (provider === PROVIDERS.OLLAMA) return /vision|llava/i.test(model);
+  return VISION_PROVIDERS.includes(provider);
+}
+
+function shouldRetryForAmbiguousAnswer(rawResponse, options) {
+  if (!options || options.length === 0) return false;
+  const text = (rawResponse || "").toLowerCase();
+  return (
+    text.includes("not enough information") ||
+    text.includes("insufficient information") ||
+    text.includes("cannot determine") ||
+    text.includes("can't determine")
+  );
 }

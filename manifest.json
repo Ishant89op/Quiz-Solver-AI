@@ -1,6 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Quiz Solver AI",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4A/POd9KMQXYgFWJo1AWqHvOxgmMcIxP+/8mvYRCV0h/+MdO1WHNjDSK1itoutCZ3eMO7qQN5m1JPJpAf24MJ9x5/f0gdSOb+YPrhkI7iUd8+ywMRhenYZJTynVfe7szeat9VrSGumAzVfbFvko28ZHv2qpk9dkOWQGxuKvZ5vSf1TLXpRakEcMq+aG6NAz2gxwabbIA+Ol3tdaFYG3+KkUv72il8LRPxClt44tT9oynLV6ZDAFFMJ7of0SdNhQN5eFTMSzYPjVWiLLnUkbkP7atWT/EL/thRhfOg5aF9FaJrQwk0vYrDvxcLsPNcYRT/pJGZ98vhOnqMHt6H8UIGwIDAQAB",
   "version": "1.1.0",
   "description": "Stealth learning assistant for post-attempt answer verification on interactive learning platforms.",
   "permissions": [

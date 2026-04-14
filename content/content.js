@@ -1,11 +1,40 @@
 (function () {
   const DEBOUNCE_DEFAULT = 1000;
+  const DEFAULT_SETTINGS = {
+    enabled: true,
+    provider: "openai",
+    displayMode: "floatingDot",
+    screenshotMode: "autoCapture",
+    autoSolve: false,
+    autoTrigger: true,
+    triggerAfterInteraction: false,
+    showExplanation: true,
+    showConfidence: true,
+    autoClearAnswer: false,
+    autoClearDelay: 10,
+    includeScreenshot: true,
+    detectionEnabled: true,
+    detectImages: true,
+    debounceDelay: DEBOUNCE_DEFAULT,
+    siteList: [],
+    activationHotkey: "Alt+Shift+A",
+    regionSelectHotkey: "Alt+Shift+S"
+  };
   const processedHashes = new Set();
   const questionDots = new Map();
-  let settings = {};
+  const authState = {
+    checked: false,
+    user: null
+  };
+  let settings = { ...DEFAULT_SETTINGS };
   let debounceTimer = null;
   let observer = null;
   let isProcessing = false;
+  let dotCardHideTimer = null;
+  let floatingCardHideTimer = null;
+  let lastFloatingAnswerKey = "";
+  let runtimeListenersBound = false;
+  let isExtensionActive = false;
 
   const LOG_PREFIX = "%c[Quiz Solver AI]";
   const LOG_STYLE = "color: #6366f1; font-weight: bold;";
@@ -13,42 +42,13 @@
   // ─── Init ───────────────────────────────────────────────────────────
   async function init() {
     console.log(LOG_PREFIX, LOG_STYLE, "Initializing...");
-
-    try {
-      const stored = await chrome.storage.local.get(null);
-      settings = extractSettings(stored);
-    } catch (e) {
-      console.warn(LOG_PREFIX, LOG_STYLE, "Failed to load settings:", e);
-      settings = {};
-    }
-
-    if (settings.enabled === false) {
-      console.log(LOG_PREFIX, LOG_STYLE, "Extension is disabled.");
-      return;
-    }
-
-    const currentHost = window.location.hostname;
-    if (settings.siteList && settings.siteList.length > 0) {
-      const blocked = settings.siteList.find(s => s.host === currentHost && !s.enabled);
-      if (blocked) {
-        console.log(LOG_PREFIX, LOG_STYLE, "Site is blocked:", currentHost);
-        return;
-      }
-    }
-
-    console.log(LOG_PREFIX, LOG_STYLE, "Active on", currentHost,
-      "| Provider:", settings.provider || "default",
-      "| Display:", settings.displayMode || "floatingDot",
-      "| AutoSolve:", settings.autoSolve || false);
-
-    scanPage();
-    startObserver();
-    setupMessageListener();
-    setupHotkeyListener();
+    bindRuntimeListeners();
+    await loadSettingsFromStorage();
+    await refreshActivationState();
   }
 
   function extractSettings(stored) {
-    const s = {};
+    const s = { ...DEFAULT_SETTINGS };
     for (const [key, value] of Object.entries(stored)) {
       if (key.startsWith("qsa_")) {
         s[key.slice(4)] = value;
@@ -57,11 +57,157 @@
     return s;
   }
 
+  async function loadSettingsFromStorage() {
+    try {
+      const stored = await chrome.storage.local.get(null);
+      settings = extractSettings(stored);
+    } catch (e) {
+      console.warn(LOG_PREFIX, LOG_STYLE, "Failed to load settings:", e);
+      settings = { ...DEFAULT_SETTINGS };
+    }
+  }
+
+  function bindRuntimeListeners() {
+    if (runtimeListenersBound) return;
+    runtimeListenersBound = true;
+    setupMessageListener();
+    setupHotkeyListener();
+    setupInteractionListeners();
+    setupStorageListener();
+  }
+
+  function isCurrentSiteBlocked() {
+    const currentHost = window.location.hostname;
+    if (!settings.siteList || settings.siteList.length === 0) {
+      return false;
+    }
+    return settings.siteList.some(site => site.host === currentHost && !site.enabled);
+  }
+
+  async function refreshActivationState() {
+    const currentHost = window.location.hostname;
+
+    if (settings.enabled === false) {
+      console.log(LOG_PREFIX, LOG_STYLE, "Extension is disabled.");
+      deactivateExtension("disabled");
+      return;
+    }
+
+    if (isCurrentSiteBlocked()) {
+      console.log(LOG_PREFIX, LOG_STYLE, "Site is blocked:", currentHost);
+      deactivateExtension("site-blocked");
+      return;
+    }
+
+    console.log(LOG_PREFIX, LOG_STYLE, "Active on", currentHost,
+      "| Provider:", settings.provider || "default",
+      "| Display:", settings.displayMode || "floatingDot",
+      "| AutoSolve:", settings.autoSolve || false);
+
+    await activateExtension();
+  }
+
+  async function activateExtension() {
+    if (isExtensionActive) {
+      const sidebar = getOrCreateSidebar();
+      if (sidebar) {
+        renderSidebarContent(sidebar);
+        applySidebarOpenState();
+      }
+      startObserver();
+      return;
+    }
+
+    isExtensionActive = true;
+    const sidebar = getOrCreateSidebar();
+    if (sidebar) {
+      await initializeSidebarState(sidebar);
+    }
+    scanPage(false, { openSidebarOnUnauth: false });
+    startObserver();
+  }
+
+  function deactivateExtension(reason = "disabled") {
+    isExtensionActive = false;
+    isProcessing = false;
+    clearTimeout(debounceTimer);
+    clearTimeout(dotCardHideTimer);
+    clearTimeout(floatingCardHideTimer);
+
+    if (observer) {
+      observer.disconnect();
+      observer = null;
+    }
+
+    sidebarState.isOpen = false;
+    teardownExtensionUi();
+    processedHashes.clear();
+
+    console.log(LOG_PREFIX, LOG_STYLE, `Runtime deactivated: ${reason}`);
+  }
+
+  async function syncAuthState() {
+    try {
+      const response = await sendRuntimeMessage(
+        { type: "firebase_get_user" },
+        { timeoutMs: 4000, timeoutMessage: "Sign-in check timed out. Please sign in again." }
+      );
+      authState.user = response?.user || null;
+      if (typeof sidebarState !== "undefined") {
+        sidebarState.authError = response?.error || "";
+      }
+    } catch (err) {
+      authState.user = null;
+      if (typeof sidebarState !== "undefined") {
+        sidebarState.authError = err?.message || "Could not verify your sign-in session. Please sign in with Google.";
+      }
+    }
+
+    authState.checked = true;
+    if (typeof sidebarState !== "undefined") {
+      sidebarState.user = authState.user;
+      sidebarState.authStatus = authState.user ? "signed_in" : "signed_out";
+    }
+    return authState.user;
+  }
+
+  function isSignedIn() {
+    return !!authState.user;
+  }
+
+  function sendRuntimeMessage(message, options = {}) {
+    return new Promise((resolve, reject) => {
+      let finished = false;
+      let timeoutId = null;
+
+      if (options.timeoutMs) {
+        timeoutId = setTimeout(() => {
+          if (finished) return;
+          finished = true;
+          reject(new Error(options.timeoutMessage || "Request timed out"));
+        }, options.timeoutMs);
+      }
+
+      chrome.runtime.sendMessage(message, (response) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeoutId);
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
   // ─── Observer ───────────────────────────────────────────────────────
   function startObserver() {
+    if (!isExtensionActive || !document.body) return;
     if (observer) observer.disconnect();
 
     observer = new MutationObserver(() => {
+      if (!isExtensionActive) return;
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         scanPage();
@@ -79,10 +225,18 @@
   function setupMessageListener() {
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg.type === "trigger_solve") {
+        if (!isExtensionActive) {
+          sendResponse({ ok: false, disabled: true });
+          return true;
+        }
         console.log(LOG_PREFIX, LOG_STYLE, "Manual trigger received");
         scanPage(true);
         sendResponse({ ok: true });
       } else if (msg.type === "trigger_region_select") {
+        if (!isExtensionActive) {
+          sendResponse({ ok: false, disabled: true });
+          return true;
+        }
         startRegionSelect();
         sendResponse({ ok: true });
       }
@@ -93,6 +247,8 @@
   // ─── Hotkey Listener ───────────────────────────────────────────────
   function setupHotkeyListener() {
     document.addEventListener("keydown", (e) => {
+      if (!isExtensionActive) return;
+
       const hotkey = settings.activationHotkey || "Alt+Shift+A";
       if (matchesHotkey(e, hotkey)) {
         e.preventDefault();
@@ -104,6 +260,93 @@
       if (matchesHotkey(e, regionHotkey)) {
         e.preventDefault();
         startRegionSelect();
+      }
+    });
+  }
+
+  function setupInteractionListeners() {
+    const scheduleInteractionScan = () => {
+      if (!isExtensionActive) return;
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        scanPage();
+      }, 120);
+    };
+
+    const shouldIgnoreTarget = (target) => {
+      if (!(target instanceof Element)) return true;
+      return !!target.closest(
+        ".qsa-sidebar-chat, .qsa-sidebar-chat-toggle, .qsa-floating-dot, .qsa-floating-card, .qsa-question-dot, .qsa-question-dot-card, .qsa-url-hash-banner, .qsa-region-overlay"
+      );
+    };
+
+    document.addEventListener("change", (e) => {
+      const target = e.target;
+      if (shouldIgnoreTarget(target)) return;
+      if (target.matches("input, select, textarea")) {
+        scheduleInteractionScan();
+      }
+    }, true);
+
+    document.addEventListener("input", (e) => {
+      const target = e.target;
+      if (shouldIgnoreTarget(target)) return;
+      if (target.matches('input[type="text"], textarea, [contenteditable="true"]')) {
+        scheduleInteractionScan();
+      }
+    }, true);
+
+    document.addEventListener("click", (e) => {
+      const target = e.target;
+      if (shouldIgnoreTarget(target)) return;
+      if (target.closest('label, [role="radio"], [role="option"], [role="checkbox"]')) {
+        scheduleInteractionScan();
+      }
+    }, true);
+  }
+
+  function setupStorageListener() {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local") return;
+
+      let shouldRefreshActivation = false;
+      let shouldClearDisplays = false;
+      let shouldRescan = false;
+
+      for (const [key, change] of Object.entries(changes)) {
+        if (!key.startsWith("qsa_")) continue;
+
+        const settingKey = key.slice(4);
+        if (typeof change.newValue === "undefined") {
+          settings[settingKey] = DEFAULT_SETTINGS[settingKey];
+        } else {
+          settings[settingKey] = change.newValue;
+        }
+
+        if (settingKey === "enabled" || settingKey === "siteList") {
+          shouldRefreshActivation = true;
+        } else {
+          shouldRescan = true;
+        }
+
+        if (["displayMode", "autoClearAnswer", "autoClearDelay"].includes(settingKey)) {
+          shouldClearDisplays = true;
+        }
+      }
+
+      if (shouldRefreshActivation) {
+        refreshActivationState();
+        return;
+      }
+
+      if (!isExtensionActive) return;
+
+      if (shouldClearDisplays) {
+        clearDisplays();
+      }
+
+      if (shouldRescan) {
+        scanPage(false, { openSidebarOnUnauth: false });
       }
     });
   }
@@ -125,10 +368,18 @@
   }
 
   // ─── Page Scanner ──────────────────────────────────────────────────
-  async function scanPage(forceTrigger = false) {
+  async function scanPage(forceTrigger = false, options = {}) {
+    if (!isExtensionActive) return;
     if (isProcessing) return;
-    if (!forceTrigger && settings.autoTrigger === false) return;
     if (settings.detectionEnabled === false) return;
+    const displayMode = getEffectiveDisplayMode();
+    if (!forceTrigger && settings.autoTrigger === false && displayMode !== "floatingDot") return;
+    if (!isSignedIn() && displayMode !== "floatingDot") {
+      if (options.openSidebarOnUnauth || forceTrigger) {
+        openSidebar();
+      }
+      return;
+    }
 
     isProcessing = true;
 
@@ -144,25 +395,48 @@
 
       for (const q of questions) {
         const hash = await hashQuestion(q.text, q.options);
+        const canAutoSolve = shouldAutoSolveQuestion(q, forceTrigger);
 
+        if (displayMode === "floatingDot") {
+          const existingDotState = questionDots.get(hash);
+          if (!existingDotState) {
+            placeDotOnQuestion(q, hash);
+          } else if (!existingDotState.element?.isConnected || existingDotState.element !== q.element) {
+            if (existingDotState.repositionDot) {
+              window.removeEventListener("scroll", existingDotState.repositionDot);
+              window.removeEventListener("resize", existingDotState.repositionDot);
+            }
+            existingDotState.dot?.remove();
+            questionDots.delete(hash);
+            placeDotOnQuestion(q, hash);
+          } else {
+            existingDotState.question = q;
+            existingDotState.element = q.element;
+            positionQuestionDot(existingDotState.dot, q.element);
+            if (dotStateHasCard(hash)) {
+              positionQuestionDotCard(existingDotState.dot);
+            }
+          }
+        }
         // Auto-solve mode: trigger all questions automatically
-        if (settings.autoSolve) {
-          if (!processedHashes.has(hash) || forceTrigger) {
+        else if (settings.autoSolve) {
+          if (canAutoSolve && (!processedHashes.has(hash) || forceTrigger)) {
             processedHashes.add(hash);
             solveAndDisplay(q, hash);
           }
         }
         // Single question → auto-trigger
         else if (questions.length === 1) {
-          if (!processedHashes.has(hash) || forceTrigger) {
+          if (canAutoSolve && (!processedHashes.has(hash) || forceTrigger)) {
             processedHashes.add(hash);
             await solveAndDisplay(q, hash);
           }
         }
         // Multiple questions: place dots
         else {
-          if (!questionDots.has(hash)) {
-            placeDotOnQuestion(q, hash);
+          if (forceTrigger && canAutoSolve && (!processedHashes.has(hash) || forceTrigger)) {
+            processedHashes.add(hash);
+            await solveAndDisplay(q, hash);
           }
         }
       }
@@ -173,10 +447,25 @@
     isProcessing = false;
   }
 
+  function shouldAutoSolveQuestion(question, forceTrigger) {
+    if (forceTrigger) return true;
+    if (!settings.triggerAfterInteraction) return true;
+    return !!question.userInteracted;
+  }
+
+  function getEffectiveDisplayMode() {
+    return settings.displayMode === "urlHash" ? "urlHash" : "floatingDot";
+  }
+
   // ─── Solve & Display ───────────────────────────────────────────────
   async function solveAndDisplay(question, hash) {
     let imageBase64 = null;
-    if (question.hasImage && settings.detectImages !== false && settings.includeScreenshot !== false) {
+    if (
+      question.hasImage &&
+      settings.detectImages !== false &&
+      settings.includeScreenshot !== false &&
+      (settings.screenshotMode || "autoCapture") === "autoCapture"
+    ) {
       imageBase64 = await captureQuestionImage(question.element);
     }
 
@@ -193,6 +482,9 @@
     }, (response) => {
       if (chrome.runtime.lastError) {
         console.error(LOG_PREFIX, LOG_STYLE, "Message error:", chrome.runtime.lastError.message);
+        return;
+      }
+      if (!isExtensionActive) {
         return;
       }
       if (response && response.type !== "error") {
@@ -213,13 +505,25 @@
           console.log(LOG_PREFIX, LOG_STYLE, "Auto-filled answer");
         }
 
-        // Display answer-only via selected mode (floatingDot, urlHash, none)
+        addToSidebar(answerData);
         displayAnswer(answerData, question.element);
 
-        // Always push full explanation to sidebar (even if sidebar mode not selected)
-        addToSidebar(answerData);
+        updateQuestionDotState(hash, answerData);
       } else if (response && response.error) {
         console.error(LOG_PREFIX, LOG_STYLE, "AI error:", response.error);
+        const errorData = {
+          answer: "Error: " + response.error,
+          full: "Error: " + response.error,
+          explanation: "",
+          confidence: "low",
+          question: question.text,
+          userAnswer: question.userAnswer,
+          questionElement: question.element,
+          questionType: question.type,
+          options: question.options
+        };
+        addToSidebar(errorData);
+        updateQuestionDotState(hash, errorData);
         displayError(response.error);
       }
     });
@@ -253,7 +557,7 @@
     const answerLower = answer.toLowerCase();
 
     // Try matching by option letter (A, B, C...) or text
-    const letterMatch = answerLower.match(/^([a-z])[.):\s]/);
+    const letterMatch = answerLower.match(/^\(?([a-z])\)?[.):\s-]*/);
     const answerLetter = letterMatch ? letterMatch[1] : null;
     const labels = "abcdefghijklmnopqrstuvwxyz";
 
@@ -327,6 +631,26 @@
   }
 
   // ─── Per-Question Dot ──────────────────────────────────────────────
+  function positionQuestionDot(dot, element) {
+    if (!dot || !element?.isConnected) return;
+
+    const rect = element.getBoundingClientRect();
+    const dotSize = 6;
+    const viewportPadding = 8;
+    const top = Math.max(
+      viewportPadding,
+      Math.min(window.innerHeight - dotSize - viewportPadding, rect.top + 6)
+    );
+    const preferredLeft = rect.left - 16;
+    const fallbackRight = rect.right + 10;
+    const left = preferredLeft >= viewportPadding
+      ? preferredLeft
+      : Math.min(window.innerWidth - dotSize - viewportPadding, fallbackRight);
+
+    dot.style.top = `${top}px`;
+    dot.style.left = `${Math.max(viewportPadding, left)}px`;
+  }
+
   function placeDotOnQuestion(question, hash) {
     if (!question.element || !question.element.isConnected) return;
 
@@ -336,16 +660,14 @@
     dot.setAttribute("data-qsa-hash", hash);
 
     // Use fixed positioning based on element's screen coordinates
-    const rect = question.element.getBoundingClientRect();
-
     Object.assign(dot.style, {
       position: "fixed",
-      top: (rect.top + 6) + "px",
-      left: (rect.left - 16) + "px",
+      top: "8px",
+      left: "8px",
       width: "6px",
       height: "6px",
       borderRadius: "50%",
-      backgroundColor: "rgba(140, 140, 140, 0.18)",
+      backgroundColor: getSubtleDotColor(0.18),
       cursor: "pointer",
       zIndex: "2147483640",
       transition: "transform 0.15s ease"
@@ -353,44 +675,185 @@
 
     dot.addEventListener("mouseenter", () => {
       dot.style.transform = "scale(1.5)";
+
+      const dotState = questionDots.get(hash);
+      if (!dotState) return;
+      dotState.isHovering = true;
+
+      if (getEffectiveDisplayMode() === "floatingDot" && dotState.answerData) {
+        showQuestionDotCard(dotState.answerData, dot);
+      }
     });
 
     dot.addEventListener("mouseleave", () => {
       dot.style.transform = "scale(1)";
+      const dotState = questionDots.get(hash);
+      if (dotState) {
+        dotState.isHovering = false;
+      }
+      scheduleHideQuestionDotCard();
     });
 
     dot.addEventListener("click", async (e) => {
       e.stopPropagation();
       e.preventDefault();
       console.log(LOG_PREFIX, LOG_STYLE, "Dot clicked for:", question.text.slice(0, 60));
+
+      if (!isSignedIn()) {
+        openSidebar();
+        return;
+      }
+
+      const dotState = questionDots.get(hash);
+      if (dotState?.isSolving) {
+        return;
+      }
+
+      if (dotState?.answerData && getEffectiveDisplayMode() === "floatingDot") {
+        showQuestionDotCard(dotState.answerData, dot);
+        return;
+      }
+
+      if (dotState) {
+        dotState.isSolving = true;
+      }
+
       await solveAndDisplay(question, hash);
     });
 
     document.body.appendChild(dot);
-    questionDots.set(hash, { dot, question, element: question.element });
+    const dotState = {
+      dot,
+      question,
+      element: question.element,
+      answerData: null,
+      isHovering: false,
+      isSolving: false,
+      repositionDot: null
+    };
+    questionDots.set(hash, dotState);
+    positionQuestionDot(dot, question.element);
 
     // Reposition on scroll
     const repositionDot = () => {
-      if (!question.element.isConnected) { dot.remove(); return; }
-      const r = question.element.getBoundingClientRect();
-      dot.style.top = (r.top + 6) + "px";
-      dot.style.left = (r.left - 16) + "px";
+      if (!question.element.isConnected) {
+        window.removeEventListener("scroll", repositionDot);
+        window.removeEventListener("resize", repositionDot);
+        dot.remove();
+        questionDots.delete(hash);
+        return;
+      }
+      positionQuestionDot(dot, question.element);
+      if (dotStateHasCard(hash)) {
+        positionQuestionDotCard(dot);
+      }
     };
+    dotState.repositionDot = repositionDot;
     window.addEventListener("scroll", repositionDot, { passive: true });
     window.addEventListener("resize", repositionDot, { passive: true });
+  }
+
+  function updateQuestionDotState(hash, answerData) {
+    const dotState = questionDots.get(hash);
+    if (!dotState) return;
+
+    dotState.answerData = answerData;
+    dotState.isSolving = false;
+    dotState.dot.style.backgroundColor = getSubtleDotColor(0.18);
+    dotState.dot.style.opacity = "1";
+    dotState.dot.title = answerData.answer || "Solved";
+
+    if (dotState.isHovering && getEffectiveDisplayMode() === "floatingDot") {
+      showQuestionDotCard(answerData, dotState.dot);
+    }
+  }
+
+  function showQuestionDotCard(data, dot) {
+    clearTimeout(dotCardHideTimer);
+
+    let card = document.querySelector(".qsa-question-dot-card");
+    if (!card) {
+      card = document.createElement("div");
+      card.className = "qsa-question-dot-card";
+      Object.assign(card.style, {
+        position: "fixed",
+        width: "260px",
+        maxWidth: "calc(100vw - 24px)",
+        maxHeight: "180px",
+        overflowY: "auto",
+        backgroundColor: "rgba(24, 24, 32, 0.96)",
+        border: "1px solid rgba(255,255,255,0.08)",
+        borderRadius: "10px",
+        padding: "10px 12px",
+        color: "#e2e8f0",
+        fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+        fontSize: "12px",
+        lineHeight: "1.45",
+        boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+        zIndex: "2147483646"
+      });
+
+      card.addEventListener("mouseenter", () => clearTimeout(dotCardHideTimer));
+      card.addEventListener("mouseleave", () => scheduleHideQuestionDotCard());
+
+      document.body.appendChild(card);
+    }
+
+    card.innerHTML = `
+      <div style="font-weight:600;color:#fff;">${escapeHtml(data.answer || "")}</div>
+    `;
+
+    card.style.display = "block";
+    positionQuestionDotCard(dot);
+  }
+
+  function positionQuestionDotCard(dot) {
+    const card = document.querySelector(".qsa-question-dot-card");
+    if (!card || !dot) return;
+
+    const rect = dot.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    const top = Math.max(8, Math.min(window.innerHeight - cardRect.height - 8, rect.top - 6));
+    const leftCandidate = rect.right + 10;
+    const left = leftCandidate + cardRect.width + 8 > window.innerWidth
+      ? Math.max(8, rect.left - cardRect.width - 10)
+      : leftCandidate;
+
+    card.style.top = `${top}px`;
+    card.style.left = `${left}px`;
+  }
+
+  function scheduleHideQuestionDotCard() {
+    clearTimeout(dotCardHideTimer);
+    dotCardHideTimer = setTimeout(() => {
+      const card = document.querySelector(".qsa-question-dot-card");
+      if (card && !card.matches(":hover")) {
+        card.style.display = "none";
+      }
+    }, 160);
+  }
+
+  function dotStateHasCard(hash) {
+    const dotState = questionDots.get(hash);
+    const card = document.querySelector(".qsa-question-dot-card");
+    return !!dotState?.isHovering && !!card && card.style.display !== "none";
   }
 
   // ─── Display Answer ────────────────────────────────────────────────
   // This only handles answer-only display (dot/hash). Sidebar is always fed separately.
   function displayAnswer(data, questionElement) {
-    const mode = settings.displayMode || "floatingDot";
+    if (!isExtensionActive) return;
+    const mode = getEffectiveDisplayMode();
 
-    // sidebar-only or none → no extra visual
-    if (mode === "none" || mode === "sidebar") return;
+    if (settings.autoSolve) {
+      clearDisplays();
+      return;
+    }
 
     switch (mode) {
       case "floatingDot":
-        showFloatingDot(data);
+        document.querySelector(".qsa-floating-dot")?.remove();
+        document.querySelector(".qsa-floating-card")?.remove();
         break;
       case "urlHash":
         showUrlHash(data);
@@ -406,6 +869,7 @@
   }
 
   function displayError(errorMsg) {
+    if (!isExtensionActive) return;
     const errorData = {
       answer: "Error: " + errorMsg,
       explanation: "",
@@ -538,31 +1002,91 @@
       });
 
       function showCard() {
+        clearTimeout(floatingCardHideTimer);
         card.style.display = "block";
         requestAnimationFrame(() => { card.style.opacity = "1"; card.style.transform = "translateY(0) scale(1)"; });
       }
 
       function hideCard() {
+        clearTimeout(floatingCardHideTimer);
         card.style.opacity = "0"; card.style.transform = "translateY(8px) scale(0.95)";
         setTimeout(() => { card.style.display = "none"; }, 250);
       }
+
+      dot._qsaPositionCard = positionCard;
+      dot._qsaShowCard = showCard;
+      dot._qsaHideCard = hideCard;
 
       document.body.appendChild(dot);
       document.body.appendChild(card);
     }
 
+    dot.style.backgroundColor = getSubtleDotColor(0.32);
+    dot.title = data.answer || "Show answer";
     updateCardContent(card, data);
+    lastFloatingAnswerKey = `${data.answer || ""}\n${data.explanation || ""}`;
   }
 
   // Card only shows the answer — full explanations go to sidebar
   function updateCardContent(card, data) {
-    card.innerHTML = `<div style="font-weight:500; font-size:13px; color:#e2e8f0;">${escapeHtml(data.answer || "")}</div>`;
+    card.innerHTML = `<div style="font-weight:600; font-size:13px; color:#e2e8f0;">${escapeHtml(data.answer || "")}</div>`;
   }
 
   // ─── URL Hash Display ──────────────────────────────────────────────
   function showUrlHash(data) {
-    const answer = (data.answer || "").replace(/[^a-zA-Z0-9-]/g, "-").slice(0, 50);
-    window.location.hash = `answer-${answer}`;
+    const answer = (data.answer || "").replace(/\s+/g, " ").trim();
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#answer=${encodeURIComponent(answer)}`);
+    document.querySelector(".qsa-url-hash-banner")?.remove();
+  }
+
+  function showUrlHashBanner(hashValue) {
+    let banner = document.querySelector(".qsa-url-hash-banner");
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.className = "qsa-url-hash-banner";
+      Object.assign(banner.style, {
+        position: "fixed",
+        top: "10px",
+        left: "12px",
+        right: "12px",
+        padding: "10px 12px",
+        borderRadius: "10px",
+        backgroundColor: "rgba(15, 23, 42, 0.96)",
+        border: "1px solid rgba(99, 102, 241, 0.25)",
+        color: "#e2e8f0",
+        fontFamily: "'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace",
+        fontSize: "12px",
+        lineHeight: "1.4",
+        whiteSpace: "normal",
+        wordBreak: "break-word",
+        zIndex: "2147483646",
+        boxShadow: "0 8px 24px rgba(0,0,0,0.28)"
+      });
+      document.body.appendChild(banner);
+    }
+
+    banner.innerHTML = "";
+
+    const label = document.createElement("div");
+    Object.assign(label.style, {
+      fontSize: "10px",
+      letterSpacing: "0.08em",
+      textTransform: "uppercase",
+      color: "#94a3b8",
+      marginBottom: "4px"
+    });
+    label.textContent = "URL hash answer";
+
+    const value = document.createElement("div");
+    Object.assign(value.style, {
+      whiteSpace: "normal",
+      overflowWrap: "anywhere",
+      wordBreak: "break-word"
+    });
+    value.textContent = hashValue;
+
+    banner.appendChild(label);
+    banner.appendChild(value);
   }
 
   // ─── Sidebar Chat (Leo Brave AI Style) ──────────────────────────────
@@ -571,128 +1095,209 @@
     chats: [],
     activeChatId: null,
     activeMessages: [],
-    view: "chat" // "list" or "chat"
+    view: "chat", // "list" or "chat"
+    isOpen: false,
+    authStatus: "checking",
+    chatStatus: "idle",
+    authError: "",
+    chatError: ""
   };
 
   function addToSidebar(data) {
+    if (!isExtensionActive) return;
     const sidebar = getOrCreateSidebar();
+    if (!sidebar) return;
+    ensureActiveChat(sidebar);
 
     // Add Q&A as messages
-    if (data.question) {
-      sidebarState.activeMessages.push({ role: "user", content: data.question, timestamp: new Date().toISOString() });
+    const questionMessage = formatSidebarQuestionMessage(data);
+    if (questionMessage) {
+      sidebarState.activeMessages.push({ role: "user", content: questionMessage, timestamp: new Date().toISOString() });
     }
 
-    let aiMessage = data.answer || "";
-    if (data.explanation) aiMessage += "\n\n" + data.explanation;
-    if (data.confidence) aiMessage += "\n\n[Confidence: " + data.confidence + "]";
+    let aiMessage = data.full || data.rawResponse || data.answer || "";
+    if (data.confidence) aiMessage += `\n\n[Confidence: ${data.confidence}]`;
     sidebarState.activeMessages.push({ role: "assistant", content: aiMessage, timestamp: new Date().toISOString() });
 
     renderSidebarContent(sidebar);
     autoSaveChat();
   }
 
-  function getOrCreateSidebar() {
-    let sidebar = document.querySelector(".qsa-sidebar-chat");
-    if (sidebar) return sidebar;
+  function formatSidebarQuestionMessage(data) {
+    const parts = [];
+    if (data.question) {
+      parts.push(`Question-\n${data.question.trim()}`);
+    }
 
-    sidebar = document.createElement("div");
-    sidebar.className = "qsa-sidebar-chat";
-    Object.assign(sidebar.style, {
+    if (Array.isArray(data.options) && data.options.length > 0) {
+      const labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      const optionLines = data.options.map((option, index) => `(${labels[index] || index + 1}) ${option}`);
+      parts.push(`Options-\n${optionLines.join("\n")}`);
+    } else {
+      parts.push("Options-\nNone provided");
+    }
+
+    if (data.userAnswer) {
+      parts.push(`Current answer-\n${data.userAnswer}`);
+    }
+
+    return parts.join("\n\n").trim();
+  }
+
+  function createSidebarElements() {
+    let sidebar = document.querySelector(".qsa-sidebar-chat");
+    if (!sidebar) {
+      sidebar = document.createElement("div");
+      sidebar.className = "qsa-sidebar-chat";
+      Object.assign(sidebar.style, {
+        position: "fixed",
+        top: "0",
+        right: "0",
+        width: "340px",
+        height: "100vh",
+        backgroundColor: "rgba(12, 12, 20, 0.98)",
+        backdropFilter: "blur(24px)",
+        WebkitBackdropFilter: "blur(24px)",
+        borderLeft: "1px solid rgba(255,255,255,0.06)",
+        display: "flex",
+        flexDirection: "column",
+        zIndex: "2147483645",
+        fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+        fontSize: "13px",
+        color: "#e2e8f0",
+        boxShadow: "-4px 0 32px rgba(0,0,0,0.4)",
+        transition: "transform 0.3s ease",
+        transform: "translateX(100%)"
+      });
+      document.body.appendChild(sidebar);
+    }
+
+    let toggle = document.querySelector(".qsa-sidebar-chat-toggle");
+    if (!toggle) {
+      toggle = document.createElement("button");
+      toggle.className = "qsa-sidebar-chat-toggle";
+      document.body.appendChild(toggle);
+    }
+
+    Object.assign(toggle.style, {
       position: "fixed",
-      top: "0",
+      top: "50%",
       right: "0",
-      width: "340px",
-      height: "100vh",
-      backgroundColor: "rgba(12, 12, 20, 0.98)",
-      backdropFilter: "blur(24px)",
-      WebkitBackdropFilter: "blur(24px)",
-      borderLeft: "1px solid rgba(255,255,255,0.06)",
-      display: "flex",
-      flexDirection: "column",
+      transform: "translateY(-50%)",
+      width: "22px",
+      height: "72px",
+      border: "none",
+      borderRadius: "8px 0 0 8px",
+      backgroundColor: "rgba(12, 12, 20, 0.96)",
+      color: "#cbd5e1",
+      cursor: "pointer",
       zIndex: "2147483645",
-      fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
-      fontSize: "13px",
-      color: "#e2e8f0",
-      boxShadow: "-4px 0 32px rgba(0,0,0,0.4)",
-      transition: "transform 0.3s ease"
+      boxShadow: "-4px 0 18px rgba(0,0,0,0.28)"
     });
 
-    document.body.appendChild(sidebar);
+    if (toggle.dataset.qsaBound !== "true") {
+      toggle.dataset.qsaBound = "true";
+      toggle.addEventListener("click", () => {
+        sidebarState.isOpen = !sidebarState.isOpen;
+        applySidebarOpenState(sidebar, toggle);
+        if (sidebarState.isOpen) {
+          renderSidebarContent(sidebar);
+        }
+      });
+    }
 
-    // Load chats from local storage first (works without sign-in)
-    loadChats(sidebar);
+    return { sidebar, toggle };
+  }
 
+  function getOrCreateSidebar() {
+    if (!isExtensionActive) return null;
+    const { sidebar, toggle } = createSidebarElements();
+    renderSidebarContent(sidebar);
+    applySidebarOpenState(sidebar, toggle);
     return sidebar;
   }
 
-  function renderSidebarContent(sidebar) {
-    sidebar.innerHTML = "";
+  function applySidebarOpenState(sidebar = document.querySelector(".qsa-sidebar-chat"), toggle = document.querySelector(".qsa-sidebar-chat-toggle")) {
+    if (!sidebar || !toggle) return;
 
-    // If not signed in, show mandatory sign-in screen
-    if (!sidebarState.user) {
-      const authScreen = document.createElement("div");
-      Object.assign(authScreen.style, {
-        flex: "1", display: "flex", flexDirection: "column",
-        alignItems: "center", justifyContent: "center", padding: "40px 24px",
-        textAlign: "center", gap: "16px"
-      });
+    sidebar.style.transform = sidebarState.isOpen ? "translateX(0)" : "translateX(100%)";
+    toggle.style.right = sidebarState.isOpen ? "340px" : "0";
+    toggle.textContent = sidebarState.isOpen ? ">" : "<";
+    toggle.style.opacity = "1";
+  }
 
-      const icon = document.createElement("div");
-      Object.assign(icon.style, { fontSize: "32px" });
-      icon.textContent = "🔒";
-      authScreen.appendChild(icon);
+  function openSidebar() {
+    if (!isExtensionActive) return;
+    sidebarState.isOpen = true;
+    applySidebarOpenState();
+  }
 
-      const heading = document.createElement("div");
-      Object.assign(heading.style, { fontWeight: "600", fontSize: "15px", color: "#e2e8f0" });
-      heading.textContent = "Sign in to continue";
-      authScreen.appendChild(heading);
+  function closeSidebar() {
+    if (!isExtensionActive) return;
+    sidebarState.isOpen = false;
+    applySidebarOpenState();
+  }
 
-      const desc = document.createElement("div");
-      Object.assign(desc.style, { fontSize: "12px", color: "#64748b", lineHeight: "1.5" });
-      desc.textContent = "Your chat history is saved to your account and persists across sessions.";
-      authScreen.appendChild(desc);
+  async function initializeSidebarState(sidebar) {
+    sidebarState.authStatus = "checking";
+    sidebarState.chatStatus = "idle";
+    sidebarState.authError = "";
+    sidebarState.chatError = "";
+    renderSidebarContent(sidebar);
 
-      const loginBtn = document.createElement("button");
-      Object.assign(loginBtn.style, {
-        padding: "10px 24px", background: "rgba(99,102,241,0.8)",
-        border: "none", borderRadius: "8px", color: "#fff", cursor: "pointer",
-        fontSize: "13px", fontWeight: "500", marginTop: "8px"
-      });
-      loginBtn.textContent = "Sign in with Google";
-      loginBtn.addEventListener("click", () => {
-        loginBtn.textContent = "Signing in...";
-        loginBtn.disabled = true;
-        chrome.runtime.sendMessage({ type: "firebase_login" }, (res) => {
-          if (res && res.user) {
-            sidebarState.user = res.user;
-            loadChats(sidebar);
-          } else {
-            loginBtn.textContent = "Sign in with Google";
-            loginBtn.disabled = false;
-          }
-        });
-      });
-      authScreen.appendChild(loginBtn);
-
-      // Close button in corner
-      const closeBtn = document.createElement("button");
-      Object.assign(closeBtn.style, {
-        position: "absolute", top: "12px", right: "12px",
-        background: "none", border: "none", color: "#94a3b8",
-        cursor: "pointer", fontSize: "18px"
-      });
-      closeBtn.textContent = "×";
-      closeBtn.addEventListener("click", () => {
-        sidebar.style.transform = "translateX(100%)";
-        setTimeout(() => sidebar.remove(), 300);
-      });
-      sidebar.appendChild(closeBtn);
-      sidebar.appendChild(authScreen);
+    const user = await syncAuthState();
+    if (!user) {
+      clearSidebarChats();
+      sidebarState.authStatus = "signed_out";
+      sidebarState.chatStatus = "idle";
+      renderSidebarContent(sidebar);
+      applySidebarOpenState();
       return;
     }
 
-    // ─── Authenticated UI ────────────────────────────────────────────
-    // Header
+    sidebarState.user = user;
+    sidebarState.authStatus = "signed_in";
+    sidebarState.authError = "";
+    restoreLocalChats();
+    sidebarState.chatStatus = sidebarState.chats.length > 0 ? "ready" : "loading";
+    renderSidebarContent(sidebar);
+    hydrateChatsFromFirebase(sidebar);
+  }
+
+  function restoreLocalChats() {
+    chrome.storage.local.get("qsa_sidebar_chats", (result) => {
+      if (sidebarState.authStatus !== "signed_in" || sidebarState.chatStatus !== "loading") {
+        return;
+      }
+
+      const localChats = result.qsa_sidebar_chats || [];
+      sidebarState.chats = localChats;
+
+      if (localChats.length > 0) {
+        const activeChat = localChats.find(chat => chat.id === sidebarState.activeChatId) || localChats[0];
+        sidebarState.activeChatId = activeChat?.id || null;
+        sidebarState.activeMessages = [...(activeChat?.messages || [])];
+      } else {
+        sidebarState.activeChatId = null;
+        sidebarState.activeMessages = [];
+      }
+
+      if (sidebarState.authStatus === "signed_in" && sidebarState.chatStatus === "loading") {
+        sidebarState.chatStatus = localChats.length > 0 ? "ready" : "loading";
+        renderSidebarContent();
+      }
+    });
+  }
+
+  function clearSidebarChats() {
+    sidebarState.chats = [];
+    sidebarState.activeChatId = null;
+    sidebarState.activeMessages = [];
+    sidebarState.view = "chat";
+    sidebarState.chatError = "";
+  }
+
+  function createSidebarHeader(titleText, { showList = false, showNewChat = false } = {}) {
     const header = document.createElement("div");
     Object.assign(header.style, {
       padding: "12px 14px",
@@ -703,57 +1308,195 @@
       flexShrink: "0"
     });
 
-    const headerLeft = document.createElement("div");
-    Object.assign(headerLeft.style, { display: "flex", alignItems: "center", gap: "8px" });
+    const left = document.createElement("div");
+    Object.assign(left.style, { display: "flex", alignItems: "center", gap: "8px" });
 
-    // Chat list toggle button
-    const listBtn = document.createElement("button");
-    Object.assign(listBtn.style, {
-      background: "none", border: "none", color: "#94a3b8",
-      cursor: "pointer", fontSize: "16px", padding: "2px 4px"
-    });
-    listBtn.textContent = "☰";
-    listBtn.title = "Chat list";
-    listBtn.addEventListener("click", () => {
-      sidebarState.view = sidebarState.view === "list" ? "chat" : "list";
-      renderSidebarContent(sidebar);
-    });
-    headerLeft.appendChild(listBtn);
+    if (showList) {
+      const listBtn = document.createElement("button");
+      Object.assign(listBtn.style, {
+        background: "none",
+        border: "none",
+        color: "#94a3b8",
+        cursor: "pointer",
+        fontSize: "16px",
+        padding: "2px 4px"
+      });
+      listBtn.textContent = "☰";
+      listBtn.title = "Chat list";
+      listBtn.addEventListener("click", () => {
+        sidebarState.view = sidebarState.view === "list" ? "chat" : "list";
+        renderSidebarContent();
+      });
+      left.appendChild(listBtn);
+    }
 
     const title = document.createElement("span");
     Object.assign(title.style, { fontWeight: "600", fontSize: "14px" });
-    title.textContent = sidebarState.view === "list" ? "Chats" : "Quiz Solver AI";
-    headerLeft.appendChild(title);
-    header.appendChild(headerLeft);
+    title.textContent = titleText;
+    left.appendChild(title);
+    header.appendChild(left);
 
-    const headerRight = document.createElement("div");
-    Object.assign(headerRight.style, { display: "flex", alignItems: "center", gap: "6px" });
+    const right = document.createElement("div");
+    Object.assign(right.style, { display: "flex", alignItems: "center", gap: "6px" });
 
-    // New chat button
-    const newChatBtn = document.createElement("button");
-    Object.assign(newChatBtn.style, {
-      background: "none", border: "none", color: "#6366f1",
-      cursor: "pointer", fontSize: "18px", padding: "2px 4px"
-    });
-    newChatBtn.textContent = "+";
-    newChatBtn.title = "New chat";
-    newChatBtn.addEventListener("click", () => createNewChat(sidebar));
-    headerRight.appendChild(newChatBtn);
+    if (showNewChat) {
+      const newChatBtn = document.createElement("button");
+      Object.assign(newChatBtn.style, {
+        background: "none",
+        border: "none",
+        color: "#6366f1",
+        cursor: "pointer",
+        fontSize: "18px",
+        padding: "2px 4px"
+      });
+      newChatBtn.textContent = "+";
+      newChatBtn.title = "New chat";
+      newChatBtn.addEventListener("click", () => createNewChat(document.querySelector(".qsa-sidebar-chat")));
+      right.appendChild(newChatBtn);
+    }
 
-    // Close button
     const closeBtn = document.createElement("button");
     Object.assign(closeBtn.style, {
-      background: "none", border: "none", color: "#94a3b8",
-      cursor: "pointer", fontSize: "18px", padding: "0 4px"
+      background: "none",
+      border: "none",
+      color: "#94a3b8",
+      cursor: "pointer",
+      fontSize: "18px",
+      padding: "0 4px"
     });
     closeBtn.textContent = "×";
-    closeBtn.addEventListener("click", () => {
-      sidebar.style.transform = "translateX(100%)";
-      setTimeout(() => sidebar.remove(), 300);
+    closeBtn.addEventListener("click", () => closeSidebar());
+    right.appendChild(closeBtn);
+
+    header.appendChild(right);
+    return header;
+  }
+
+  function renderCenteredSidebarState(sidebar, { title, body, error = "", loading = false, showLogin = false } = {}) {
+    sidebar.appendChild(createSidebarHeader("Quiz Solver AI"));
+
+    const panel = document.createElement("div");
+    Object.assign(panel.style, {
+      flex: "1",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: "32px 24px",
+      textAlign: "center",
+      gap: "14px"
     });
-    headerRight.appendChild(closeBtn);
-    header.appendChild(headerRight);
-    sidebar.appendChild(header);
+
+    const icon = document.createElement("div");
+    Object.assign(icon.style, { fontSize: "32px" });
+    icon.textContent = loading ? "…" : "🔒";
+    panel.appendChild(icon);
+
+    const heading = document.createElement("div");
+    Object.assign(heading.style, { fontWeight: "600", fontSize: "15px", color: "#e2e8f0" });
+    heading.textContent = title;
+    panel.appendChild(heading);
+
+    const desc = document.createElement("div");
+    Object.assign(desc.style, { fontSize: "12px", color: "#64748b", lineHeight: "1.5" });
+    desc.textContent = body;
+    panel.appendChild(desc);
+
+    const status = document.createElement("div");
+    Object.assign(status.style, {
+      minHeight: "18px",
+      fontSize: "11px",
+      color: error ? "#fca5a5" : "#94a3b8"
+    });
+    status.textContent = error || (loading ? "Please wait…" : "");
+    panel.appendChild(status);
+
+    if (showLogin) {
+      const loginBtn = document.createElement("button");
+      Object.assign(loginBtn.style, {
+        padding: "10px 24px",
+        background: "rgba(99,102,241,0.8)",
+        border: "none",
+        borderRadius: "8px",
+        color: "#fff",
+        cursor: "pointer",
+        fontSize: "13px",
+        fontWeight: "500",
+        marginTop: "8px"
+      });
+      loginBtn.textContent = "Sign in with Google";
+      loginBtn.addEventListener("click", async () => {
+        sidebarState.authError = "";
+        loginBtn.textContent = "Signing in...";
+        loginBtn.disabled = true;
+
+        try {
+          const res = await sendRuntimeMessage(
+            { type: "firebase_login" },
+            { timeoutMs: 95000, timeoutMessage: "Google sign-in timed out. Check the OAuth redirect URI and Firebase authorized domain, then try again." }
+          );
+
+          if (res && res.user) {
+            authState.user = res.user;
+            authState.checked = true;
+            sidebarState.user = res.user;
+            sidebarState.authStatus = "signed_in";
+            sidebarState.chatStatus = "loading";
+            sidebarState.authError = "";
+            sidebarState.chatError = "";
+            openSidebar();
+            restoreLocalChats();
+            renderSidebarContent(sidebar);
+            hydrateChatsFromFirebase(sidebar);
+            scanPage(true);
+            return;
+          }
+
+          sidebarState.authStatus = "signed_out";
+          sidebarState.authError = res?.error || "Sign-in failed. Check the OAuth redirect and Firebase authorized domain.";
+          openSidebar();
+          renderSidebarContent(sidebar);
+        } catch (err) {
+          sidebarState.authStatus = "signed_out";
+          sidebarState.authError = err?.message || "Google sign-in timed out. Please try again.";
+          openSidebar();
+          renderSidebarContent(sidebar);
+        }
+      });
+      panel.appendChild(loginBtn);
+    }
+
+    sidebar.appendChild(panel);
+  }
+
+  function renderSidebarContent(sidebar) {
+    sidebar = sidebar || document.querySelector(".qsa-sidebar-chat");
+    if (!sidebar) return;
+    sidebar.innerHTML = "";
+
+    if (sidebarState.authStatus === "checking") {
+      renderCenteredSidebarState(sidebar, {
+        title: "Checking sign-in",
+        body: "Checking your Google session before loading your Firestore-backed chats.",
+        loading: true
+      });
+      return;
+    }
+
+    if (sidebarState.authStatus !== "signed_in" || !sidebarState.user) {
+      renderCenteredSidebarState(sidebar, {
+        title: "Sign in to continue",
+        body: "Google sign-in is required. Your sidebar chats are stored in Firestore and persist across sessions.",
+        error: sidebarState.authError,
+        showLogin: true
+      });
+      return;
+    }
+
+    sidebar.appendChild(createSidebarHeader(sidebarState.view === "list" ? "Chats" : "Quiz Solver AI", {
+      showList: true,
+      showNewChat: true
+    }));
 
     if (sidebarState.view === "list") {
       renderChatList(sidebar);
@@ -779,7 +1522,13 @@
     if (sidebarState.chats.length === 0) {
       const empty = document.createElement("div");
       Object.assign(empty.style, { textAlign: "center", padding: "40px 10px", color: "#64748b", fontSize: "12px" });
-      empty.textContent = sidebarState.user ? "No chats yet. Click + to start." : "Sign in to save chat history.";
+      if (sidebarState.chatStatus === "loading") {
+        empty.textContent = "Loading chats from Firestore...";
+      } else if (sidebarState.chatStatus === "error") {
+        empty.textContent = sidebarState.chatError || "Failed to load chats.";
+      } else {
+        empty.textContent = "No chats yet. Click + to start.";
+      }
       listArea.appendChild(empty);
     } else {
       for (const chat of sidebarState.chats) {
@@ -865,7 +1614,17 @@
       gap: "10px"
     });
 
-    if (sidebarState.activeMessages.length === 0) {
+    if (sidebarState.chatStatus === "loading" && sidebarState.activeMessages.length === 0) {
+      const loading = document.createElement("div");
+      Object.assign(loading.style, { textAlign: "center", padding: "40px 10px", color: "#64748b", fontSize: "12px" });
+      loading.textContent = "Loading your chats...";
+      messagesArea.appendChild(loading);
+    } else if (sidebarState.chatStatus === "error" && sidebarState.activeMessages.length === 0) {
+      const error = document.createElement("div");
+      Object.assign(error.style, { textAlign: "center", padding: "40px 10px", color: "#fca5a5", fontSize: "12px" });
+      error.textContent = sidebarState.chatError || "Failed to load chats.";
+      messagesArea.appendChild(error);
+    } else if (sidebarState.activeMessages.length === 0) {
       const welcome = document.createElement("div");
       Object.assign(welcome.style, { textAlign: "center", padding: "40px 10px", color: "#64748b", fontSize: "12px" });
       welcome.textContent = "Ask me anything about your quiz!";
@@ -946,6 +1705,7 @@
     function handleSend() {
       const text = input.value.trim();
       if (!text) return;
+      ensureActiveChat(sidebar);
 
       sidebarState.activeMessages.push({ role: "user", content: text, timestamp: new Date().toISOString() });
       sidebarState.activeMessages.push({ role: "assistant", content: "Thinking...", loading: true });
@@ -1023,10 +1783,14 @@
     logoutBtn.textContent = "Sign out";
     logoutBtn.addEventListener("click", () => {
       chrome.runtime.sendMessage({ type: "firebase_logout" }, () => {
+        authState.user = null;
+        authState.checked = true;
         sidebarState.user = null;
-        sidebarState.chats = [];
-        sidebarState.activeChatId = null;
-        sidebarState.activeMessages = [];
+        sidebarState.authStatus = "signed_out";
+        sidebarState.chatStatus = "idle";
+        sidebarState.authError = "";
+        clearSidebarChats();
+        openSidebar();
         renderSidebarContent(sidebar);
       });
     });
@@ -1035,44 +1799,50 @@
     sidebar.appendChild(footer);
   }
 
-  function loadChats(sidebar) {
-    // Always load from chrome.storage.local first
-    chrome.storage.local.get("qsa_sidebar_chats", (result) => {
-      const localChats = result.qsa_sidebar_chats || [];
-      sidebarState.chats = localChats;
+  function hydrateChatsFromFirebase(sidebar) {
+    sidebarState.chatStatus = "loading";
+    sidebarState.chatError = "";
+    renderSidebarContent(sidebar);
 
-      // Auto-select most recent chat or create first one
-      if (localChats.length > 0 && !sidebarState.activeChatId) {
-        sidebarState.activeChatId = localChats[0].id;
-        sidebarState.activeMessages = [...(localChats[0].messages || [])];
-      } else if (localChats.length === 0) {
-        // Create a default first chat
-        const firstChat = {
-          id: "local_" + Date.now(),
-          title: "Chat " + new Date().toLocaleTimeString(),
-          messages: [],
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        };
-        sidebarState.chats = [firstChat];
-        sidebarState.activeChatId = firstChat.id;
-        sidebarState.activeMessages = [];
+    chrome.runtime.sendMessage({ type: "firebase_get_chats" }, (res) => {
+      if (res && Array.isArray(res.chats) && res.chats.length > 0) {
+        sidebarState.chats = [...res.chats];
+
+        const activeChat = sidebarState.chats.find(c => c.id === sidebarState.activeChatId) || sidebarState.chats[0];
+        sidebarState.activeChatId = activeChat?.id || null;
+        sidebarState.activeMessages = [...(activeChat?.messages || [])];
+        sidebarState.chatStatus = "ready";
+        sidebarState.chatError = "";
         saveChatsToLocal();
+        renderSidebarContent(sidebar);
+        return;
       }
 
-      renderSidebarContent(sidebar);
+      if (res?.error) {
+        sidebarState.chatStatus = "error";
+        sidebarState.chatError = res.error;
+        renderSidebarContent(sidebar);
+        return;
+      }
 
-      // Also check Firebase user (non-blocking)
-      chrome.runtime.sendMessage({ type: "firebase_get_user" }, (res) => {
-        if (res && res.user) {
-          sidebarState.user = res.user;
-          renderSidebarContent(sidebar);
-        }
-      });
+      sidebarState.chatStatus = "ready";
+      sidebarState.chatError = "";
+      renderSidebarContent(sidebar);
     });
   }
 
-  function createNewChat(sidebar) {
+  function ensureActiveChat(sidebar) {
+    if (sidebarState.activeChatId || !sidebarState.user) return;
+    createNewChat(sidebar, { render: false });
+  }
+
+  function createNewChat(sidebar, options = {}) {
+    if (!sidebarState.user) {
+      openSidebar();
+      renderSidebarContent(sidebar);
+      return;
+    }
+
     const title = "Chat " + new Date().toLocaleTimeString();
     const chatId = "local_" + Date.now();
 
@@ -1088,22 +1858,26 @@
     sidebarState.activeChatId = chatId;
     sidebarState.activeMessages = [];
     sidebarState.view = "chat";
+    sidebarState.chatStatus = "ready";
+    sidebarState.chatError = "";
 
     saveChatsToLocal();
 
-    // Also save to Firebase if logged in
-    if (sidebarState.user) {
-      chrome.runtime.sendMessage({ type: "firebase_create_chat", title }, (res) => {
-        if (res && res.chat) {
-          // Update local ID to Firebase ID
-          newChat.id = res.chat.id;
-          sidebarState.activeChatId = res.chat.id;
-          saveChatsToLocal();
-        }
-      });
-    }
+    chrome.runtime.sendMessage({ type: "firebase_create_chat", title }, (res) => {
+      if (res && res.chat) {
+        newChat.id = res.chat.id;
+        sidebarState.activeChatId = res.chat.id;
+        saveChatsToLocal();
+        autoSaveChat();
+      }
+      if (options.render !== false) {
+        renderSidebarContent(sidebar);
+      }
+    });
 
-    renderSidebarContent(sidebar);
+    if (options.render !== false) {
+      renderSidebarContent(sidebar);
+    }
   }
 
   function autoSaveChat() {
@@ -1141,17 +1915,57 @@
     chrome.storage.local.set({ qsa_sidebar_chats: sidebarState.chats });
   }
 
+  function teardownExtensionUi() {
+    clearDisplays();
+    clearQuestionDots();
+    removeSidebar();
+    removeRegionOverlay();
+  }
+
+  function clearQuestionDots() {
+    for (const dotState of questionDots.values()) {
+      if (dotState?.repositionDot) {
+        window.removeEventListener("scroll", dotState.repositionDot);
+        window.removeEventListener("resize", dotState.repositionDot);
+      }
+      dotState?.dot?.remove();
+    }
+    questionDots.clear();
+  }
+
+  function removeSidebar() {
+    document.querySelector(".qsa-sidebar-chat")?.remove();
+    document.querySelector(".qsa-sidebar-chat-toggle")?.remove();
+  }
+
+  function removeRegionOverlay() {
+    document.querySelector(".qsa-region-overlay")?.remove();
+    document.querySelector(".qsa-region-selection")?.remove();
+  }
+
   // ─── Clear Displays ────────────────────────────────────────────────
   function clearDisplays() {
     const dot = document.querySelector(".qsa-floating-dot");
     const card = document.querySelector(".qsa-floating-card");
+    const questionCard = document.querySelector(".qsa-question-dot-card");
+    const hashBanner = document.querySelector(".qsa-url-hash-banner");
+    clearTimeout(floatingCardHideTimer);
     if (dot) dot.remove();
     if (card) card.remove();
-    window.location.hash = "";
+    if (questionCard) questionCard.remove();
+    if (hashBanner) hashBanner.remove();
+    lastFloatingAnswerKey = "";
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
   }
 
   // ─── Region Screenshot ─────────────────────────────────────────────
   function startRegionSelect() {
+    if (!isExtensionActive) return;
+    if (!isSignedIn()) {
+      openSidebar();
+      return;
+    }
+
     if (document.querySelector(".qsa-region-overlay")) return;
 
     const overlay = document.createElement("div");
@@ -1165,6 +1979,7 @@
     });
 
     const selBox = document.createElement("div");
+    selBox.className = "qsa-region-selection";
     Object.assign(selBox.style, {
       position: "fixed",
       border: "2px dashed #6366f1",
@@ -1220,8 +2035,30 @@
               questionHash: "region_" + Date.now(),
               userAnswer: null
             }, (resp) => {
-              if (resp && resp.type !== "error") displayAnswer(resp);
-              else if (resp && resp.error) displayError(resp.error);
+              if (resp && resp.type !== "error") {
+                const answerData = {
+                  ...resp,
+                  question: "What is the answer to the question shown in this image?",
+                  userAnswer: null,
+                  questionType: "image",
+                  options: []
+                };
+
+                addToSidebar(answerData);
+                displayAnswer(answerData);
+              } else if (resp && resp.error) {
+                addToSidebar({
+                  answer: "Error: " + resp.error,
+                  full: "Error: " + resp.error,
+                  explanation: "",
+                  confidence: "low",
+                  question: "What is the answer to the question shown in this image?",
+                  userAnswer: null,
+                  questionType: "image",
+                  options: []
+                });
+                displayError(resp.error);
+              }
             });
           };
           img.src = response.dataUrl;
@@ -1251,6 +2088,13 @@
 
   function detectMCQ() {
     const results = [];
+    const seenContainers = new Set();
+
+    function pushUniqueMcq(result) {
+      if (!result?.element || seenContainers.has(result.element)) return;
+      seenContainers.add(result.element);
+      results.push(result);
+    }
 
     // Radio groups
     const radioGroups = {};
@@ -1261,20 +2105,19 @@
     });
 
     for (const [name, radios] of Object.entries(radioGroups)) {
-      const container = findQuestionContainer(radios[0]);
+      const { container, text: questionText } = getQuestionContext(radios[0], radios);
       if (!container) continue;
-      const questionText = extractQuestionText(container, radios);
-      if (!questionText || questionText.length < 5) continue;
-
-      const options = radios.map(r => (findLabelForInput(r) || "").trim()).filter(Boolean);
+      const options = extractChoiceOptions(container, radios);
       if (options.length < 2) continue;
+      const questionStem = normalizeQuestionStem(questionText, { options });
+      if (!questionStem || questionStem.length < 5) continue;
 
       const selected = radios.find(r => r.checked);
-      results.push({
-        type: "mcq_single", text: questionText, options,
+      pushUniqueMcq({
+        type: "mcq_single", text: questionStem, options,
         element: container, hasImage: containerHasImage(container),
         userInteracted: !!selected,
-        userAnswer: selected ? (findLabelForInput(selected) || "").trim() : null
+        userAnswer: selected ? extractChoiceLabel(selected, container) : null
       });
     }
 
@@ -1291,37 +2134,76 @@
 
     for (const { container, inputs } of Object.values(checkboxGroups)) {
       if (inputs.length < 2) continue;
-      const questionText = extractQuestionText(container, inputs);
-      if (!questionText || questionText.length < 5) continue;
-
-      const options = inputs.map(cb => (findLabelForInput(cb) || "").trim()).filter(Boolean);
+      const context = getQuestionContext(inputs[0], inputs);
+      const options = extractChoiceOptions(context.container || container, inputs);
+      const questionStem = normalizeQuestionStem(context.text, { options });
+      const questionContainer = context.container || container;
+      if (!questionStem || questionStem.length < 5) continue;
       const selected = inputs.filter(cb => cb.checked);
-      results.push({
-        type: "mcq_multi", text: questionText, options,
-        element: container, hasImage: containerHasImage(container),
+      pushUniqueMcq({
+        type: "mcq_multi", text: questionStem, options,
+        element: questionContainer, hasImage: containerHasImage(questionContainer),
         userInteracted: selected.length > 0,
-        userAnswer: selected.length > 0 ? selected.map(cb => (findLabelForInput(cb) || "").trim()).join(", ") : null
+        userAnswer: selected.length > 0 ? selected.map(cb => extractChoiceLabel(cb, questionContainer)).filter(Boolean).join(", ") : null
       });
     }
 
     // ARIA-based
     document.querySelectorAll('[role="radiogroup"], [role="listbox"]').forEach(group => {
-      const questionText = extractQuestionText(group);
-      if (!questionText || questionText.length < 5) return;
       const items = group.querySelectorAll('[role="radio"], [role="option"]');
       if (items.length < 2) return;
+      const { container, text: questionText } = getQuestionContext(group, Array.from(items));
+      const questionContainer = container || group;
+      const options = extractChoiceOptions(questionContainer, Array.from(items));
+      const questionStem = normalizeQuestionStem(questionText, { options });
+      if (!questionStem || questionStem.length < 5) return;
 
-      const options = Array.from(items).map(item => cleanText(item)).filter(Boolean);
       const selected = Array.from(items).find(item =>
         item.getAttribute("aria-checked") === "true" || item.getAttribute("aria-selected") === "true"
       );
-      results.push({
-        type: "mcq_single", text: questionText, options,
-        element: group, hasImage: containerHasImage(group),
+      pushUniqueMcq({
+        type: "mcq_single", text: questionStem, options,
+        element: questionContainer, hasImage: containerHasImage(questionContainer),
         userInteracted: !!selected,
-        userAnswer: selected ? cleanText(selected) : null
+        userAnswer: selected ? extractChoiceLabel(selected, questionContainer) : null
       });
     });
+
+    // Standalone ARIA choice items without a radiogroup/listbox wrapper.
+    const ariaChoiceGroups = new Map();
+    document.querySelectorAll('[role="radio"], [role="checkbox"], [role="option"]').forEach(item => {
+      if (item.closest('[role="radiogroup"], [role="listbox"]')) return;
+      const container = findQuestionContainer(item);
+      if (!container || seenContainers.has(container)) return;
+
+      if (!ariaChoiceGroups.has(container)) {
+        ariaChoiceGroups.set(container, []);
+      }
+      ariaChoiceGroups.get(container).push(item);
+    });
+
+    for (const [container, items] of ariaChoiceGroups.entries()) {
+      if (items.length < 2) continue;
+      const { text: questionText } = getQuestionContext(items[0], items);
+      const options = extractChoiceOptions(container, items);
+      const questionStem = normalizeQuestionStem(questionText, { options });
+      if (!questionStem || questionStem.length < 5 || options.length < 2) continue;
+
+      const selected = items.filter(item =>
+        item.getAttribute("aria-checked") === "true" || item.getAttribute("aria-selected") === "true"
+      );
+      const isMulti = items.some(item => item.getAttribute("role") === "checkbox");
+
+      pushUniqueMcq({
+        type: isMulti ? "mcq_multi" : "mcq_single",
+        text: questionStem,
+        options,
+        element: container,
+        hasImage: containerHasImage(container),
+        userInteracted: selected.length > 0,
+        userAnswer: selected.length > 0 ? selected.map(item => extractChoiceLabel(item, container)).filter(Boolean).join(", ") : null
+      });
+    }
 
     return results;
   }
@@ -1330,42 +2212,41 @@
     const results = [];
 
     document.querySelectorAll(
-      'input[type="text"]:not([qsa-scanned]), textarea:not([qsa-scanned]), [contenteditable="true"]:not([qsa-scanned])'
+      'input[type="text"], textarea, [contenteditable="true"]'
     ).forEach(input => {
       if (input.closest('.qsa-sidebar-chat, .qsa-floating-dot, .qsa-floating-card')) return;
       if (input.type === "search" || input.type === "password" || input.type === "email") return;
       if (input.name && /search|login|email|password|username/i.test(input.name)) return;
 
-      const container = findQuestionContainer(input);
+      const { container, text: questionText } = getQuestionContext(input, [input]);
       if (!container) return;
-      const questionText = extractQuestionText(container, [input]);
-      if (!questionText || questionText.length < 5) return;
-
-      input.setAttribute("qsa-scanned", "true");
+      if (hasChoiceInputs(container)) return;
       const value = input.value || input.textContent || "";
+      const questionStem = normalizeQuestionStem(questionText, { userAnswer: value });
+      if (!questionStem || questionStem.length < 5) return;
       results.push({
-        type: "fill_blank", text: questionText, options: [],
+        type: "fill_blank", text: questionStem, options: [],
         element: container, hasImage: containerHasImage(container),
         userInteracted: value.length > 0, userAnswer: value || null
       });
     });
 
-    document.querySelectorAll('select:not([qsa-scanned])').forEach(select => {
+    document.querySelectorAll('select').forEach(select => {
       if (select.closest('.qsa-sidebar-chat')) return;
       if (select.options.length < 2 || select.options.length > 30) return;
 
-      const container = findQuestionContainer(select);
+      const { container, text: questionText } = getQuestionContext(select, [select]);
       if (!container) return;
-      const questionText = extractQuestionText(container, [select]);
-      if (!questionText || questionText.length < 5) return;
-
-      select.setAttribute("qsa-scanned", "true");
+      if (hasChoiceInputs(container)) return;
       const options = Array.from(select.options).filter(o => o.value).map(o => o.textContent.trim());
+      const selectedValue = select.selectedIndex > 0 ? select.options[select.selectedIndex].textContent.trim() : "";
+      const questionStem = normalizeQuestionStem(questionText, { options, userAnswer: selectedValue });
+      if (!questionStem || questionStem.length < 5) return;
       results.push({
-        type: "cloze", text: questionText, options,
+        type: "cloze", text: questionStem, options,
         element: container, hasImage: containerHasImage(container),
         userInteracted: select.selectedIndex > 0,
-        userAnswer: select.selectedIndex > 0 ? select.options[select.selectedIndex].textContent.trim() : null
+        userAnswer: selectedValue || null
       });
     });
 
@@ -1374,17 +2255,15 @@
 
   function detectImageQuestions() {
     const results = [];
-    document.querySelectorAll('img:not([qsa-scanned]), canvas:not([qsa-scanned])').forEach(el => {
+    document.querySelectorAll('img, canvas').forEach(el => {
       if (el.closest('.qsa-sidebar-chat, .qsa-floating-dot')) return;
       if (el.tagName === "IMG" && (el.width < 50 || el.height < 50)) return;
 
-      const container = findQuestionContainer(el);
+      const { container, text: questionText } = getQuestionContext(el, [el]);
       if (!container) return;
-      const questionText = extractQuestionText(container, [el]);
       if (!questionText || questionText.length < 3) return;
       if (results.some(r => r.element === container)) return;
 
-      el.setAttribute("qsa-scanned", "true");
       results.push({
         type: "image", text: questionText || "What is shown in this image?",
         options: [], element: container, hasImage: true,
@@ -1422,34 +2301,266 @@
   // ─── DOM Helpers ───────────────────────────────────────────────────
   function findQuestionContainer(el) {
     const selectors = [
+      '[role="listitem"]',
+      '.Qr7Oae', '.geS5n', '.o3Dpx', '.M7eMe',
       '[class*="question"]', '[class*="quiz"]', '[class*="problem"]',
       '[class*="exercise"]', '[class*="prompt"]', '[class*="item"]',
       '[data-question]', '[data-quiz]',
-      'fieldset', 'form',
+      'fieldset',
       '[role="group"]', '[role="form"]',
       'li', 'article', 'section'
     ];
     for (const selector of selectors) {
       const match = el.closest(selector);
-      if (match && match !== document.body) return match;
+      if (match && match !== document.body && !isOverbroadQuestionContainer(match, el)) {
+        return match;
+      }
     }
+
+    const fallbackForm = el.closest("form");
+    if (fallbackForm && fallbackForm !== document.body && !isOverbroadQuestionContainer(fallbackForm, el)) {
+      return fallbackForm;
+    }
+
     let parent = el.parentElement;
     let depth = 0;
     while (parent && depth < 6) {
-      if (parent.children.length > 1) return parent;
+      if (parent.children.length > 1 && !isOverbroadQuestionContainer(parent, el)) return parent;
       parent = parent.parentElement;
       depth++;
     }
     return el.parentElement;
   }
 
+  function isOverbroadQuestionContainer(container, sourceEl) {
+    if (!container || container === sourceEl) return false;
+
+    const textLength = extractQuestionText(container, [sourceEl]).length;
+    const interactiveCount = container.querySelectorAll(
+      'input, textarea, select, [contenteditable="true"], [role="radio"], [role="checkbox"], [role="option"], [role="textbox"]'
+    ).length;
+    const nestedQuestionCount = container.querySelectorAll(
+      '[role="listitem"], .Qr7Oae, fieldset, [data-question], [role="radiogroup"], [role="listbox"]'
+    ).length;
+
+    if (container.matches("form") && nestedQuestionCount > 1) return true;
+    if (nestedQuestionCount > 3) return true;
+    if (interactiveCount > 12) return true;
+    if (textLength > 1200) return true;
+
+    return false;
+  }
+
+  function getQuestionContext(sourceEl, excludeEls = []) {
+    const initialContainer = findQuestionContainer(sourceEl);
+    if (!initialContainer) {
+      return { container: null, text: "" };
+    }
+
+    const sourceValue = getElementCurrentValue(sourceEl);
+    let bestContainer = initialContainer;
+    let bestText = "";
+    let bestScore = -Infinity;
+    let current = initialContainer;
+    let depth = 0;
+
+    while (current && current !== document.body && depth < 6) {
+      const candidateText = extractQuestionText(current, excludeEls);
+      const candidateScore = scoreQuestionContext(current, candidateText, sourceValue);
+
+      if (candidateScore > bestScore) {
+        bestScore = candidateScore;
+        bestContainer = current;
+        bestText = candidateText;
+      }
+
+      current = current.parentElement;
+      depth++;
+    }
+
+    return {
+      container: bestContainer,
+      text: bestText
+    };
+  }
+
+  function scoreQuestionContext(container, text, sourceValue = "") {
+    if (!text) return -Infinity;
+
+    const normalizedText = text.toLowerCase().replace(/\s+/g, " ").trim();
+    const normalizedValue = String(sourceValue || "").toLowerCase().replace(/\s+/g, " ").trim();
+    const length = normalizedText.length;
+    const interactiveCount = container.querySelectorAll(
+      'input, textarea, select, [contenteditable="true"], [role="radio"], [role="checkbox"], [role="option"], [role="textbox"]'
+    ).length;
+
+    let score = Math.min(length, 220);
+    if (length < 12) score -= 180;
+    if (length > 700) score -= Math.min(900, (length - 700) * 1.5);
+    if (/[?]/.test(text)) score += 40;
+    if (/\b(select|choose|enter|fill|which|what|how|why|when|where|correct|answer|question|option)\b/i.test(text)) {
+      score += 24;
+    }
+    if (container.matches('[role="listitem"], .Qr7Oae, fieldset, [class*="question"], [class*="quiz"], [class*="problem"], [class*="prompt"], [data-question], [data-quiz], [role="group"], [role="form"]')) {
+      score += 40;
+    }
+    if (container.matches("form")) score -= 220;
+    if (container.querySelector("label, legend, h1, h2, h3, h4, h5, h6, p")) {
+      score += 20;
+    }
+    if (interactiveCount > 10) {
+      score -= Math.min(400, interactiveCount * 18);
+    }
+
+    if (normalizedValue) {
+      if (normalizedText === normalizedValue) score -= 600;
+      if (normalizedText.startsWith(normalizedValue) && length <= normalizedValue.length + 12) score -= 300;
+    }
+
+    return score;
+  }
+
   function extractQuestionText(container, excludeEls = []) {
     if (!container) return "";
     const clone = container.cloneNode(true);
-    clone.querySelectorAll('input, textarea, select, button, script, style, [class*="qsa-"]').forEach(el => el.remove());
-    let text = (clone.innerText || clone.textContent || "").replace(/\s+/g, " ").trim();
-    if (text.length > 1000) text = text.slice(0, 1000);
+    for (const excludedEl of excludeEls) {
+      if (!(excludedEl instanceof Element) || !container.contains(excludedEl)) continue;
+      const cloneMatch = getClonedElementMatch(container, clone, excludedEl);
+      const removable = cloneMatch?.closest(
+        'label, [role="radio"], [role="checkbox"], [role="option"], [role="listitem"], [class*="option"], [class*="choice"], [class*="answer"]'
+      ) || cloneMatch;
+      if (removable && removable !== clone) {
+        removable.remove();
+      }
+    }
+    clone.querySelectorAll('input, textarea, select, button, script, style, [class*="qsa-"], [contenteditable="true"], [role="textbox"]').forEach(el => el.remove());
+    return (clone.innerText || clone.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function getClonedElementMatch(originalRoot, clonedRoot, targetEl) {
+    const path = [];
+    let current = targetEl;
+
+    while (current && current !== originalRoot) {
+      const parent = current.parentElement;
+      if (!parent) return null;
+      path.unshift(Array.from(parent.children).indexOf(current));
+      current = parent;
+    }
+
+    if (current !== originalRoot) return null;
+
+    let cloneCursor = clonedRoot;
+    for (const childIndex of path) {
+      cloneCursor = cloneCursor.children[childIndex];
+      if (!cloneCursor) return null;
+    }
+
+    return cloneCursor;
+  }
+
+  function normalizeQuestionStem(questionText, { options = [], userAnswer = "" } = {}) {
+    let stem = String(questionText || "").replace(/\s+/g, " ").trim();
+    if (!stem) return "";
+
+    stem = stripQuestionTailAfterPrompt(stem, { options, userAnswer });
+    stem = stripEmbeddedUserAnswer(stem, userAnswer);
+    stem = stripOptionTail(stem, options);
+    stem = stem.replace(/\s*\*+\s*$/, "").trim();
+    stem = stem.replace(/\bYour answer\b\s*$/i, "").trim();
+
+    return stem;
+  }
+
+  function stripQuestionTailAfterPrompt(text, { options = [], userAnswer = "" } = {}) {
+    const normalizedOptions = (options || [])
+      .map(option => String(option || "").replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    const normalizedAnswer = String(userAnswer || "").replace(/\s+/g, " ").trim();
+
+    const lastQuestionMark = text.lastIndexOf("?");
+    if (lastQuestionMark >= 0 && lastQuestionMark < text.length - 1) {
+      const tail = text.slice(lastQuestionMark + 1).trim();
+      const compactTail = tail.replace(/\s+/g, "");
+      const looksLikeOptionTail =
+        normalizedOptions.length > 0 ||
+        !!normalizedAnswer ||
+        /^(\*+)?[A-Za-z0-9,./()\- ]{1,120}$/.test(tail) ||
+        /^[A-Za-z0-9]{6,}$/.test(compactTail);
+
+      if (looksLikeOptionTail) {
+        return text.slice(0, lastQuestionMark + 1).trim();
+      }
+    }
+
+    const requiredMarkerIndex = text.search(/\s\*+\s*/);
+    if (requiredMarkerIndex > 8) {
+      const tail = text.slice(requiredMarkerIndex).replace(/^\s*\*+\s*/, "").trim();
+      const compactTail = tail.replace(/\s+/g, "");
+      const looksLikeRequiredTail =
+        normalizedOptions.length > 0 ||
+        !!normalizedAnswer ||
+        /^your answer$/i.test(tail) ||
+        /^([A-Za-z0-9,./()\- ]{1,120})$/.test(tail) ||
+        /^[A-Za-z0-9]{4,}$/.test(compactTail);
+
+      if (looksLikeRequiredTail) {
+        return text.slice(0, requiredMarkerIndex).trim();
+      }
+    }
+
     return text;
+  }
+
+  function stripEmbeddedUserAnswer(text, userAnswer) {
+    const answer = String(userAnswer || "").replace(/\s+/g, " ").trim();
+    if (!answer) return text;
+
+    const escapedAnswer = escapeRegExp(answer);
+    return text
+      .replace(new RegExp(`\\bYour answer\\b\\s*(?:\\*+\\s*)?${escapedAnswer}\\s*$`, "i"), "")
+      .replace(new RegExp(`(?:\\*+\\s*)?${escapedAnswer}\\s*$`, "i"), "")
+      .trim();
+  }
+
+  function stripOptionTail(text, options) {
+    const normalizedOptions = (options || [])
+      .map(option => String(option || "").replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+
+    if (normalizedOptions.length < 2) return text;
+
+    const lowerText = text.toLowerCase();
+    const hits = normalizedOptions
+      .map(option => ({ option, index: lowerText.indexOf(option.toLowerCase()) }))
+      .filter(hit => hit.index >= 0);
+
+    if (hits.length < 2) return text;
+
+    const firstOptionIndex = Math.min(...hits.map(hit => hit.index));
+    const head = text.slice(0, firstOptionIndex).trim();
+    const tail = text.slice(firstOptionIndex).toLowerCase();
+    const optionsInTail = normalizedOptions.filter(option => tail.includes(option.toLowerCase())).length;
+
+    if (head.length >= 8 && optionsInTail >= Math.min(2, normalizedOptions.length)) {
+      return head.replace(/\s*[:\-]+$/, "").trim();
+    }
+
+    return text;
+  }
+
+  function getElementCurrentValue(el) {
+    if (!el) return "";
+    if (typeof el.value === "string" && el.value.trim()) {
+      return el.value.trim();
+    }
+    if (el.tagName === "SELECT" && el.selectedIndex >= 0) {
+      return el.options?.[el.selectedIndex]?.textContent?.trim() || "";
+    }
+    if (el.contentEditable === "true" || el.getAttribute("role") === "textbox") {
+      return cleanText(el);
+    }
+    return cleanText(el);
   }
 
   function findLabelForInput(input, root) {
@@ -1466,6 +2577,75 @@
     const nextEl = input.nextElementSibling;
     if (nextEl && ["SPAN", "DIV", "P"].includes(nextEl.tagName)) return cleanText(nextEl);
     return "";
+  }
+
+  function extractChoiceOptions(container, choiceEls = []) {
+    const choices = choiceEls.length > 0
+      ? Array.from(choiceEls)
+      : Array.from(container?.querySelectorAll('input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"], [role="option"]') || []);
+
+    const labels = choices
+      .map(choice => extractChoiceLabel(choice, container))
+      .filter(Boolean);
+
+    return dedupeStrings(labels);
+  }
+
+  function extractChoiceLabel(choiceEl, container) {
+    if (!choiceEl) return "";
+
+    const ariaLabel = choiceEl.getAttribute?.("aria-label");
+    if (ariaLabel && !/^option$/i.test(ariaLabel.trim())) {
+      return ariaLabel.replace(/\s+/g, " ").trim();
+    }
+
+    if (choiceEl.matches?.('input[type="radio"], input[type="checkbox"]')) {
+      const inputLabel = findLabelForInput(choiceEl, container || document);
+      if (inputLabel) return inputLabel;
+    }
+
+    const labelLike = choiceEl.closest?.(
+      'label, [role="listitem"], [class*="option"], [class*="choice"], [class*="answer"], .docssharedWizToggleLabeledContainer'
+    );
+    if (labelLike) {
+      const text = cleanText(labelLike);
+      if (text) return text;
+    }
+
+    const descendants = choiceEl.querySelectorAll?.('span, div, p');
+    if (descendants?.length) {
+      for (const node of descendants) {
+        const text = cleanText(node);
+        if (text && text.length < 160) {
+          return text;
+        }
+      }
+    }
+
+    return cleanText(choiceEl);
+  }
+
+  function dedupeStrings(values) {
+    const seen = new Set();
+    const output = [];
+
+    for (const value of values) {
+      const normalized = String(value || "").replace(/\s+/g, " ").trim();
+      if (!normalized) continue;
+      const key = normalized.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      output.push(normalized);
+    }
+
+    return output;
+  }
+
+  function hasChoiceInputs(container) {
+    if (!container) return false;
+    return container.querySelector(
+      'input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"], [role="option"], [role="radiogroup"], [role="listbox"]'
+    ) !== null;
   }
 
   function containerHasImage(container) {
@@ -1489,6 +2669,21 @@
     return d.innerHTML;
   }
 
+  function escapeRegExp(str) {
+    return String(str || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function getConfidenceColor(confidence) {
+    if (confidence === "high") return "rgba(34, 197, 94, 0.9)";
+    if (confidence === "medium") return "rgba(245, 158, 11, 0.9)";
+    if (confidence === "low") return "rgba(239, 68, 68, 0.9)";
+    return "rgba(99, 102, 241, 0.9)";
+  }
+
+  function getSubtleDotColor(alpha = 0.24) {
+    return `rgba(148, 163, 184, ${alpha})`;
+  }
+
   async function hashQuestion(text, options = []) {
     const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
     const optionStr = (options || []).map(o => o.toLowerCase().replace(/\s+/g, " ").trim()).sort().join("|");
@@ -1502,7 +2697,32 @@
     if (!element) return null;
     try {
       const response = await chrome.runtime.sendMessage({ type: "capture_tab" });
-      if (response && response.dataUrl) return response.dataUrl.split(",")[1];
+      if (!response || !response.dataUrl) return null;
+
+      const rect = element.getBoundingClientRect();
+      if (rect.width < 10 || rect.height < 10) return null;
+
+      return await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const dpr = window.devicePixelRatio || 1;
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, Math.round(rect.width * dpr));
+          canvas.height = Math.max(1, Math.round(rect.height * dpr));
+          const ctx = canvas.getContext("2d");
+
+          ctx.drawImage(
+            img,
+            rect.x * dpr, rect.y * dpr,
+            rect.width * dpr, rect.height * dpr,
+            0, 0, canvas.width, canvas.height
+          );
+
+          resolve(canvas.toDataURL("image/png").split(",")[1]);
+        };
+        img.onerror = () => resolve(null);
+        img.src = response.dataUrl;
+      });
     } catch { /* skip */ }
     return null;
   }

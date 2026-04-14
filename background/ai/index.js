@@ -29,7 +29,7 @@ export async function callAI(provider, config, prompt, imageBase64 = null) {
 
   const fullConfig = {
     ...config,
-    systemPrompt: SYSTEM_PROMPT
+    systemPrompt: config.systemPrompt || SYSTEM_PROMPT
   };
 
   try {
@@ -38,6 +38,9 @@ export async function callAI(provider, config, prompt, imageBase64 = null) {
     const errorMsg = err.message || "Unknown error";
     if (errorMsg.includes("401") || errorMsg.includes("Unauthorized")) {
       throw new Error("Invalid API key - check your key in settings");
+    }
+    if (errorMsg.includes("403")) {
+      throw new Error("Access denied for this model or provider - check model permissions and account access");
     }
     if (errorMsg.includes("429") || errorMsg.includes("rate")) {
       throw new Error("Rate limit reached - wait a moment and try again");

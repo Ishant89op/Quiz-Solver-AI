@@ -55,14 +55,12 @@ export const MODELS = {
     { id: "o4-mini", label: "o4 Mini", vision: true }
   ],
   [PROVIDERS.GEMINI]: [
-    { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro", vision: true },
-    { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite", vision: true },
-    { id: "gemini-3-flash", label: "Gemini 3 Flash", vision: true },
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", vision: true },
     { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", vision: true },
     { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite", vision: true },
     { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", vision: true },
-    { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite", vision: true }
+    { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite", vision: true },
+    { id: "gemini-1.5-flash", label: "Gemini 1.5 Flash", vision: true }
   ],
   [PROVIDERS.QWEN]: [
     { id: "qwen-turbo", label: "Qwen Turbo", vision: false },
@@ -80,10 +78,13 @@ export const MODELS = {
   [PROVIDERS.GROQ]: [
     { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", vision: false },
     { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B", vision: false },
+    { id: "meta-llama/llama-4-scout-17b-16e-instruct", label: "Llama 4 Scout 17B", vision: true },
     { id: "llama3-70b-8192", label: "Llama 3 70B", vision: false },
     { id: "llama3-8b-8192", label: "Llama 3 8B", vision: false },
     { id: "mixtral-8x7b-32768", label: "Mixtral 8x7B", vision: false },
-    { id: "gemma2-9b-it", label: "Gemma 2 9B", vision: false }
+    { id: "gemma2-9b-it", label: "Gemma 2 9B", vision: false },
+    { id: "openai/gpt-oss-20b", label: "GPT-OSS 20B", vision: false },
+    { id: "openai/gpt-oss-120b", label: "GPT-OSS 120B", vision: false }
   ],
   [PROVIDERS.OPENROUTER]: [
     { id: "google/gemini-2.5-flash-preview", label: "Gemini 2.5 Flash", vision: true },
@@ -105,8 +106,11 @@ export const MODELS = {
   [PROVIDERS.OLLAMA]: [
     { id: "llama3", label: "Llama 3 (8B)", vision: false },
     { id: "llama3.1", label: "Llama 3.1 (8B)", vision: false },
+    { id: "llama3.1:70b", label: "Llama 3.1 (70B)", vision: false },
+    { id: "llama3.2:1b", label: "Llama 3.2 (1B)", vision: false },
     { id: "llama3.2", label: "Llama 3.2 (3B)", vision: false },
     { id: "llama3.2-vision", label: "Llama 3.2 Vision (11B)", vision: true },
+    { id: "llama3.2-vision:90b", label: "Llama 3.2 Vision (90B)", vision: true },
     { id: "llama3.3", label: "Llama 3.3 (70B)", vision: false },
     { id: "mistral", label: "Mistral (7B)", vision: false },
     { id: "mixtral", label: "Mixtral 8x7B", vision: false },
@@ -124,10 +128,10 @@ export const MODELS = {
 export const DEFAULT_MODELS = {
   [PROVIDERS.CLAUDE]: "claude-sonnet-4-5",
   [PROVIDERS.OPENAI]: "gpt-4o-mini",
-  [PROVIDERS.GEMINI]: "gemini-2.5-flash",
+  [PROVIDERS.GEMINI]: "gemini-2.0-flash-lite",
   [PROVIDERS.QWEN]: "qwen-plus",
   [PROVIDERS.MISTRAL]: "mistral-small-latest",
-  [PROVIDERS.GROQ]: "llama-3.3-70b-versatile",
+  [PROVIDERS.GROQ]: "llama-3.1-8b-instant",
   [PROVIDERS.OPENROUTER]: "meta-llama/llama-3.1-8b-instruct:free",
   [PROVIDERS.OLLAMA]: "llama3",
   [PROVIDERS.CUSTOM]: ""
@@ -227,18 +231,28 @@ export const VISION_PROVIDERS = [
   PROVIDERS.GEMINI
 ];
 
-export const SYSTEM_PROMPT = `You are a precise quiz-solving assistant. Analyze the given question and provide the correct answer.
+export const SYSTEM_PROMPT = `You are a precise quiz-solving assistant.
 
 Respond ONLY with valid JSON in this exact format:
 {
-  "answer": "The correct answer letter or text",
-  "explanation": "One sentence explaining why this is correct",
+  "only_answer": "(A) option text",
+  "full": "Final answer: (A) option text. Brief explanation here.",
   "confidence": "high | medium | low"
 }
 
 Rules:
-- For MCQ, return the option letter (A, B, C, D) and the option text
-- For fill-in-the-blank, return the exact text to fill in
-- For image questions, describe what you see and answer accordingly
-- Be concise and definitive
-- confidence must be exactly one of: high, medium, low`;
+- Use the entire question and every option exactly as provided.
+- For MCQ, "only_answer" must include the option letter and option text.
+- For fill-in-the-blank, "only_answer" must contain only the final answer text.
+- "full" must start with the final answer, then give a concise explanation.
+- Be decisive. If options are provided, choose the single best option.
+- Never reply that there is not enough information when a best answer can be inferred.
+- Do not include markdown, code fences, or extra keys.
+- confidence must be exactly one of: high, medium, low.`;
+
+export const CHAT_SYSTEM_PROMPT = `You are Quiz Solver AI's sidebar assistant.
+
+Help the user briefly and directly.
+When discussing a quiz, prefer the most likely answer and a short explanation.
+When the user is chatting generally, answer conversationally but stay concise.
+Do not output JSON unless the user explicitly asks for it.`;
