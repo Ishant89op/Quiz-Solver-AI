@@ -475,7 +475,7 @@
       questionType: question.type,
       userAnswer: question.userAnswer || null,
       questionHash: hash
-    });
+    }, { openSidebar: false });
 
     chrome.runtime.sendMessage({
       type: "solve_question",
@@ -725,7 +725,6 @@
     dot.addEventListener("click", async (e) => {
       e.stopPropagation();
       e.preventDefault();
-      console.log(LOG_PREFIX, LOG_STYLE, "Dot clicked for:", question.text.slice(0, 60));
 
       if (!isSignedIn()) {
         openSidebar();
@@ -737,12 +736,20 @@
         return;
       }
 
+      // Use the latest question data from dotState (updated on re-scans)
+      // instead of the stale closure reference
+      const currentQuestion = dotState?.question || question;
+      console.log(LOG_PREFIX, LOG_STYLE, "Dot clicked for:", currentQuestion.text.slice(0, 60));
+
+      // Re-detect the question from the current DOM state to get fresh option text
+      const freshQuestion = redetectQuestion(currentQuestion);
+
       if (dotState) {
         dotState.isSolving = true;
         dotState.dot.title = "Solving...";
       }
 
-      await solveAndDisplay(question, hash);
+      await solveAndDisplay(freshQuestion, hash);
     });
 
     document.body.appendChild(dot);
@@ -1231,7 +1238,9 @@
     if (!chatId) return null;
 
     sidebarState.view = "chat";
-    openSidebar(sidebar);
+    if (options.openSidebar !== false) {
+      openSidebar(sidebar);
+    }
 
     const userMessage = createSidebarMessage({
       role: "user",
@@ -2383,6 +2392,90 @@
   }
 
   // ─── Question Detection ────────────────────────────────────────────
+
+  /**
+   * Re-extract question data from the current DOM for a previously detected question.
+   * This ensures fresh option text and question stem are captured at click time,
+   * rather than relying on potentially stale data from the initial scan.
+   */
+  function redetectQuestion(originalQuestion) {
+    if (!originalQuestion?.element?.isConnected) {
+      return originalQuestion;
+    }
+
+    const el = originalQuestion.element;
+    const type = originalQuestion.type;
+
+    try {
+      if (type === "mcq_single" || type === "mcq_multi") {
+        // Re-extract options from the container
+        const radios = el.querySelectorAll('input[type="radio"]');
+        const checkboxes = el.querySelectorAll('input[type="checkbox"]');
+        const ariaItems = el.querySelectorAll('[role="radio"], [role="option"], [role="checkbox"]');
+        const choiceEls = radios.length > 0 ? Array.from(radios)
+                        : checkboxes.length > 0 ? Array.from(checkboxes)
+                        : Array.from(ariaItems);
+
+        if (choiceEls.length >= 2) {
+          const freshOptions = extractChoiceOptions(el, choiceEls);
+
+          // Re-extract question text
+          const { text: rawText } = getQuestionContext(choiceEls[0], choiceEls);
+          const questionStem = normalizeQuestionStem(rawText, { options: freshOptions });
+
+          // Determine user interaction
+          let userInteracted = false;
+          let userAnswer = null;
+          if (type === "mcq_single") {
+            const selected = choiceEls.find(r => r.checked ||
+              r.getAttribute("aria-checked") === "true" ||
+              r.getAttribute("aria-selected") === "true");
+            userInteracted = !!selected;
+            userAnswer = selected ? extractChoiceLabel(selected, el) : null;
+          } else {
+            const selected = choiceEls.filter(cb => cb.checked ||
+              cb.getAttribute("aria-checked") === "true");
+            userInteracted = selected.length > 0;
+            userAnswer = selected.length > 0
+              ? selected.map(cb => extractChoiceLabel(cb, el)).filter(Boolean).join(", ")
+              : null;
+          }
+
+          // Only use fresh data if we got meaningful options
+          if (freshOptions.length >= 2 && questionStem && questionStem.length >= 5) {
+            return {
+              ...originalQuestion,
+              text: questionStem,
+              options: freshOptions,
+              userInteracted,
+              userAnswer,
+              hasImage: containerHasImage(el)
+            };
+          }
+        }
+      } else if (type === "fill_blank") {
+        const input = el.querySelector('input[type="text"], textarea, [contenteditable="true"]');
+        if (input) {
+          const { text: rawText } = getQuestionContext(input, [input]);
+          const value = input.value || input.textContent || "";
+          const questionStem = normalizeQuestionStem(rawText, { userAnswer: value });
+          if (questionStem && questionStem.length >= 5) {
+            return {
+              ...originalQuestion,
+              text: questionStem,
+              userInteracted: value.length > 0,
+              userAnswer: value || null
+            };
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(LOG_PREFIX, LOG_STYLE, "Re-detect failed, using original:", err);
+    }
+
+    return originalQuestion;
+  }
+
   function detectQuestions() {
     const results = [];
     results.push(...detectMCQ());
@@ -2788,8 +2881,10 @@
     if (lastQuestionMark >= 0 && lastQuestionMark < text.length - 1) {
       const tail = text.slice(lastQuestionMark + 1).trim();
       const compactTail = tail.replace(/\s+/g, "");
+      // Don't count very short options (single letters) as evidence of option tail
+      const hasSubstantialOptions = normalizedOptions.length > 0 && normalizedOptions.some(opt => opt.length > 2);
       const looksLikeOptionTail =
-        normalizedOptions.length > 0 ||
+        hasSubstantialOptions ||
         !!normalizedAnswer ||
         /^(\*+)?[A-Za-z0-9,./()\- ]{1,120}$/.test(tail) ||
         /^[A-Za-z0-9]{6,}$/.test(compactTail);
@@ -2803,8 +2898,9 @@
     if (requiredMarkerIndex > 8) {
       const tail = text.slice(requiredMarkerIndex).replace(/^\s*\*+\s*/, "").trim();
       const compactTail = tail.replace(/\s+/g, "");
+      const hasSubstantialOpts = normalizedOptions.length > 0 && normalizedOptions.some(opt => opt.length > 2);
       const looksLikeRequiredTail =
-        normalizedOptions.length > 0 ||
+        hasSubstantialOpts ||
         !!normalizedAnswer ||
         /^your answer$/i.test(tail) ||
         /^([A-Za-z0-9,./()\- ]{1,120})$/.test(tail) ||
@@ -2835,6 +2931,11 @@
       .filter(Boolean);
 
     if (normalizedOptions.length < 2) return text;
+
+    // Don't strip when options are very short (single letters/numbers like A, B, C, D)
+    // as they match everywhere in the text and cause catastrophic truncation
+    const allVeryShort = normalizedOptions.every(opt => opt.length <= 2);
+    if (allVeryShort) return text;
 
     const lowerText = text.toLowerCase();
     const hits = normalizedOptions
@@ -2871,17 +2972,66 @@
 
   function findLabelForInput(input, root) {
     const rootEl = root || document;
+
+    // 1. Standard label[for] association
     if (input.id) {
       const label = rootEl.querySelector(`label[for="${input.id}"]`);
-      if (label) return cleanText(label);
+      if (label) {
+        const text = cleanText(label);
+        if (text && text.length > 1) return text;
+      }
     }
-    const parentLabel = input.closest("label");
-    if (parentLabel) return cleanText(parentLabel);
 
+    // 2. Parent label element
+    const parentLabel = input.closest("label");
+    if (parentLabel) {
+      const text = cleanText(parentLabel);
+      if (text && text.length > 1) return text;
+    }
+
+    // 3. Walk up to the nearest option/choice wrapper and get its full text
+    const optionWrapper = input.closest(
+      '[role="listitem"], [class*="option"], [class*="choice"], [class*="answer"], ' +
+      '.docssharedWizToggleLabeledContainer, li, [data-value]'
+    );
+    if (optionWrapper && optionWrapper !== (root || document.body)) {
+      const text = cleanText(optionWrapper);
+      if (text && text.length > 1) return text;
+    }
+
+    // 4. Next text sibling
     const sibling = input.nextSibling;
-    if (sibling && sibling.nodeType === Node.TEXT_NODE && sibling.textContent.trim()) return sibling.textContent.trim();
+    if (sibling && sibling.nodeType === Node.TEXT_NODE && sibling.textContent.trim().length > 1) {
+      return sibling.textContent.trim();
+    }
+
+    // 5. Next element sibling
     const nextEl = input.nextElementSibling;
-    if (nextEl && ["SPAN", "DIV", "P"].includes(nextEl.tagName)) return cleanText(nextEl);
+    if (nextEl && ["SPAN", "DIV", "P", "LABEL", "A"].includes(nextEl.tagName)) {
+      const text = cleanText(nextEl);
+      if (text && text.length > 1) return text;
+    }
+
+    // 6. Previous element sibling (some platforms put label before input)
+    const prevEl = input.previousElementSibling;
+    if (prevEl && ["SPAN", "DIV", "P", "LABEL"].includes(prevEl.tagName)) {
+      const text = cleanText(prevEl);
+      if (text && text.length > 1) return text;
+    }
+
+    // 7. Immediate parent's text (excluding input's own text)
+    const parent = input.parentElement;
+    if (parent && parent !== (root || document.body)) {
+      const text = cleanText(parent);
+      if (text && text.length > 1) return text;
+    }
+
+    // 8. Fallback to single-char text from parentLabel
+    if (parentLabel) {
+      const text = cleanText(parentLabel);
+      if (text) return text;
+    }
+
     return "";
   }
 
@@ -2894,38 +3044,132 @@
       .map(choice => extractChoiceLabel(choice, container))
       .filter(Boolean);
 
-    return dedupeStrings(labels);
+    const deduped = dedupeStrings(labels);
+
+    // If all extracted options are suspiciously short (single characters like A, B, C, D),
+    // try to get more meaningful option text from the question container
+    const allSingleChar = deduped.length >= 2 && deduped.every(opt => opt.replace(/^[(\[{]?([A-Za-z0-9])[)\]}]?[.):]*$/, "$1").length <= 1);
+    if (allSingleChar && container) {
+      const betterOptions = extractOptionsFromContainerText(container, choices);
+      if (betterOptions.length >= 2) {
+        return betterOptions;
+      }
+    }
+
+    return deduped;
+  }
+
+  /**
+   * Fallback option extraction: when standard label extraction only yields single letters,
+   * try to extract option text from the container's DOM structure by finding
+   * option-like wrapper elements near each choice input.
+   */
+  function extractOptionsFromContainerText(container, choiceEls) {
+    const options = [];
+
+    for (const choice of choiceEls) {
+      // Walk up from the choice to find the nearest wrapper that has meaningful text
+      let walker = choice.parentElement;
+      let found = "";
+      let depth = 0;
+
+      while (walker && walker !== container && depth < 5) {
+        const siblings = walker.parentElement?.children;
+        if (siblings && siblings.length >= 2) {
+          // This parent has multiple children — likely an option row
+          const text = cleanText(walker);
+          if (text && text.length > 1) {
+            found = text;
+            break;
+          }
+        }
+        walker = walker.parentElement;
+        depth++;
+      }
+
+      if (!found) {
+        // Try the choice element's closest meaningful wrapper
+        const wrapper = choice.closest('li, [class*="option"], [class*="choice"], [class*="answer"], [role="listitem"], div');
+        if (wrapper && wrapper !== container) {
+          const text = cleanText(wrapper);
+          if (text && text.length > 1) {
+            found = text;
+          }
+        }
+      }
+
+      if (found) {
+        options.push(found);
+      }
+    }
+
+    return dedupeStrings(options);
   }
 
   function extractChoiceLabel(choiceEl, container) {
     if (!choiceEl) return "";
 
+    // 1. ARIA label
     const ariaLabel = choiceEl.getAttribute?.("aria-label");
-    if (ariaLabel && !/^option$/i.test(ariaLabel.trim())) {
+    if (ariaLabel && !/^option$/i.test(ariaLabel.trim()) && ariaLabel.trim().length > 1) {
       return ariaLabel.replace(/\s+/g, " ").trim();
     }
 
+    // 2. aria-labelledby reference
+    const labelledBy = choiceEl.getAttribute?.("aria-labelledby");
+    if (labelledBy) {
+      const labelEl = document.getElementById(labelledBy);
+      if (labelEl) {
+        const text = cleanText(labelEl);
+        if (text && text.length > 1) return text;
+      }
+    }
+
+    // 3. data-value attribute (some platforms store option text here)
+    const dataValue = choiceEl.getAttribute?.("data-value") || choiceEl.getAttribute?.("data-answer");
+    if (dataValue && dataValue.length > 1) {
+      return dataValue.replace(/\s+/g, " ").trim();
+    }
+
+    // 4. For standard inputs, use findLabelForInput
     if (choiceEl.matches?.('input[type="radio"], input[type="checkbox"]')) {
       const inputLabel = findLabelForInput(choiceEl, container || document);
-      if (inputLabel) return inputLabel;
+      if (inputLabel && inputLabel.length > 1) return inputLabel;
     }
 
+    // 5. Walk up to nearest option-like wrapper
     const labelLike = choiceEl.closest?.(
-      'label, [role="listitem"], [class*="option"], [class*="choice"], [class*="answer"], .docssharedWizToggleLabeledContainer'
+      'label, [role="listitem"], [class*="option"], [class*="choice"], [class*="answer"], .docssharedWizToggleLabeledContainer, li'
     );
-    if (labelLike) {
+    if (labelLike && labelLike !== container) {
       const text = cleanText(labelLike);
-      if (text) return text;
+      if (text && text.length > 1) return text;
     }
 
+    // 6. Search descendants
     const descendants = choiceEl.querySelectorAll?.('span, div, p');
     if (descendants?.length) {
       for (const node of descendants) {
         const text = cleanText(node);
-        if (text && text.length < 160) {
+        if (text && text.length > 1 && text.length < 160) {
           return text;
         }
       }
+    }
+
+    // 7. Walk up through parents to find a meaningful wrapper with sibling structure
+    let walker = choiceEl.parentElement;
+    let depth = 0;
+    while (walker && walker !== container && depth < 4) {
+      if (walker.parentElement) {
+        const siblingCount = walker.parentElement.children.length;
+        if (siblingCount >= 2) {
+          const text = cleanText(walker);
+          if (text && text.length > 1) return text;
+        }
+      }
+      walker = walker.parentElement;
+      depth++;
     }
 
     return cleanText(choiceEl);

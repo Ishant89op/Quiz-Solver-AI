@@ -74,11 +74,37 @@ export function estimateTokens(text) {
 }
 
 export function parseJSON(str) {
+  if (!str || typeof str !== "string") return null;
+
   try {
+    // 1. Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+    const fenced = str.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+    if (fenced) {
+      const inner = fenced[1].trim();
+      const innerJson = inner.match(/\{[\s\S]*\}/);
+      if (innerJson) {
+        try { return JSON.parse(innerJson[0]); } catch { /* fall through */ }
+      }
+    }
+
+    // 2. Try direct parse
+    const trimmed = str.trim();
+    if (trimmed.startsWith("{")) {
+      try { return JSON.parse(trimmed); } catch { /* fall through */ }
+    }
+
+    // 3. Try greedy match for {...}
     const jsonMatch = str.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+      try { return JSON.parse(jsonMatch[0]); } catch { /* fall through */ }
     }
+
+    // 4. Try non-greedy match (first complete JSON object)
+    const nonGreedy = str.match(/\{[\s\S]*?\}/);
+    if (nonGreedy) {
+      try { return JSON.parse(nonGreedy[0]); } catch { /* fall through */ }
+    }
+
     return null;
   } catch {
     return null;

@@ -223,11 +223,21 @@ function buildPrompt(question, options, questionType, userAnswer, settings) {
   prompt += "Question-\n";
   prompt += `${question}\n\n`;
   prompt += "Options-\n";
-  if (options && options.length > 0) {
+
+  // Detect if options are just single letters (extraction may have failed)
+  const hasRealOptions = options && options.length > 0;
+  const allSingleChar = hasRealOptions && options.every(opt =>
+    opt.replace(/^[(\[{]?\s*([A-Za-z0-9])\s*[)\]}]?[.):]*\s*$/, "$1").length <= 1
+  );
+
+  if (hasRealOptions && !allSingleChar) {
     const labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     options.forEach((opt, i) => {
       prompt += `(${labels[i] || i + 1}) ${opt}\n`;
     });
+  } else if (hasRealOptions && allSingleChar) {
+    prompt += "Options could not be fully extracted. The option text may be embedded in the question text above or visible in the attached screenshot.\n";
+    prompt += "Look for the actual option content in the question and use it to determine the best answer.\n";
   } else {
     prompt += "None provided\n";
   }
@@ -244,6 +254,9 @@ function buildPrompt(question, options, questionType, userAnswer, settings) {
   prompt += "\nReturn JSON with `only_answer`, `full`, and `confidence`.\n";
   prompt += "`only_answer` must contain just the final answer.\n";
   prompt += "`full` must start with the final answer, then give the full explanation.\n";
+  if (allSingleChar) {
+    prompt += "Include the full option text in your answer, not just the letter.\n";
+  }
 
   return prompt;
 }
